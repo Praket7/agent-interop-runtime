@@ -77,7 +77,7 @@ export class CliPtyRuntime implements Runtime {
   async activeWork(id?:string): Promise<Json> { return id ? redact(this.manager.snapshot(id)) as Json : []; }
   async listFiles(_projectId:string): Promise<string[]> { return []; }
   async readFile(_projectId:string, _relative:string): Promise<{path:string;content:string}> { throw new Error('CLI runtime does not expose project file reads'); }
-  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root,id)) as Json; }
+  async sendMessage(id:string,text:string): Promise<Json> { return redact(await this.manager.send(id,text,this.root)) as Json; }
   async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
   async resume(id:string): Promise<Json> { return redact(await this.manager.send(id,'/resume',this.root,id)) as Json; }
   async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
