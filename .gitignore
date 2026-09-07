@@ -1,6 +1,5 @@
 node_modules/
 dist/
-work/*.tgz
-work/bridge-research-*/
+work/
 .env*
 !.env.example
