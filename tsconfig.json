@@ -4,5 +4,5 @@
     "outDir": "dist", "rootDir": ".", "strict": true, "esModuleInterop": true,
     "skipLibCheck": true, "noUncheckedIndexedAccess": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }

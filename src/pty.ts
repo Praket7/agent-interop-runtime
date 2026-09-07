@@ -8,7 +8,8 @@ export interface CliSessionSnapshot { id: string; conversationId?: string; pid: 
 
 function cliCandidates(): string[] {
   const home = os.homedir();
-  return [process.env.FREEBUFF_CLI_PATH ?? '', path.join(home, '.config', 'manicode', 'freebuff.exe'), path.join(home, '.config', 'manicode', 'freebuff')].filter(Boolean);
+  const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).flatMap((entry) => [path.join(entry, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff'), path.join(entry, 'freebuff')]);
+  return [process.env.FREEBUFF_CLI_PATH ?? '', path.join(home, '.config', 'manicode', 'freebuff.exe'), path.join(home, '.config', 'manicode', 'freebuff'), ...pathEntries].filter(Boolean);
 }
 
 export async function findFreebuffCli(): Promise<string | null> {
@@ -17,7 +18,7 @@ export async function findFreebuffCli(): Promise<string | null> {
 }
 
 export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 0): Promise<string | null> {
-  const chats = path.join(os.homedir(), '.config', 'manicode', 'projects', path.basename(cwd), 'chats');
+  const chats = path.join(os.homedir(), '.config', 'manicode', 'projects', process.env.FREEBUFF_PROJECT_KEY ?? path.basename(cwd), 'chats');
   try {
     const entries = await fs.readdir(chats, { withFileTypes: true });
     const candidates: Array<{ id: string; mtimeMs: number }> = [];
@@ -44,7 +45,7 @@ export class CliPtyManager {
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
     const startedAt = Date.now();
-    const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, useConpty: true, env: { ...process.env, TERM: 'xterm-256color' } });
+    const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
