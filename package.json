@@ -22,7 +22,8 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --import tsx test/**/*.test.ts",
+    "test": "node --test --import tsx test/**/*.test.ts tests/**/*.test.ts",
+    "lint": "node scripts/lint.mjs",
     "pack:check": "pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {

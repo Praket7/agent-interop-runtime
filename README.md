@@ -52,6 +52,19 @@ The runtime uses a small common contract for sessions, operations, events, diffs
 
 The evidence model separates native facts from observations and independent verification. It never treats a message that says a file changed as proof that the file changed.
 
+## Useful commands
+
+```text
+node dist/src/cli.js doctor
+node dist/src/cli.js agents
+node dist/src/cli.js sessions
+node dist/src/cli.js work list
+node dist/src/cli.js work evidence WORK_ID
+node dist/src/cli.js work verify WORK_ID pnpm test pnpm typecheck pnpm build
+```
+
+The MCP surface includes discovery, exact session control, bounded event reads, native diffs, structured work creation, handoffs, review requests, durable evidence, and deterministic verification.
+
 ## Verification
 
 ```text

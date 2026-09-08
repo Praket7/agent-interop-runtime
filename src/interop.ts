@@ -64,14 +64,14 @@ export interface EvidenceRecord {
   nativeId: string;
   kind: 'session' | 'event' | 'diff' | 'verification';
   capturedAt: string;
-  trust: 'native' | 'observed' | 'verified';
+  trust: 'agent_claim' | 'provider_observed' | 'runtime_observed' | 'repository_verified' | 'external_verified' | 'human_accepted' | 'native' | 'observed' | 'verified';
   summary: string;
   data: Json;
 }
 
 export interface WorkGraphSnapshot {
   sessions: AgentSession[];
-  edges: Array<{ from: string; to: string; kind: 'handoff' | 'review' | 'parent' | 'evidence' }>;
+  edges: Array<{ from: string; to: string; kind: 'handoff' | 'review' | 'parent' | 'evidence' | 'depends_on' | 'verifies' | 'supersedes' | 'blocks' | 'shares_workspace_with' }>;
   evidence: EvidenceRecord[];
 }
 

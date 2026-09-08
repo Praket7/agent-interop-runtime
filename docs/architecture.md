@@ -1,16 +1,34 @@
 # Architecture
 
-The MCP layer depends on a small runtime interface. Desktop discovery reads dynamic localhost ports from platform-specific Freebuff logs and probes `/api/projects`; there is no fixed fallback port. By default the bridge prefers a responding Desktop orchestrator, then falls back to the installed CLI PTY. CLI history is read from Freebuff's local chat store, and project reads are canonicalized and confined to the configured project root. Desktop mutation calls remain read-only unless a verified Freebuff authorization contract is available.
+Agent Interop Runtime has four layers.
 
-After Desktop discovery, `DesktopEventClient` subscribes to the local `/api/events` SSE endpoint using the verified launch-ID header. It normalizes untrusted events into a bounded per-thread in-memory `ProgressStore` with sequence numbers, TTL eviction, redaction, and reconnect backoff. `get_thread_progress` polls that store and `watch_thread` waits for up to 30 seconds; neither tool writes to Freebuff or persists event data. Saved snapshots and live events remain separate consistency domains.
+The provider layer speaks to native systems. Freebuff uses the preserved Desktop and managed PTY bridge. OpenCode uses its local HTTP server. Codex uses its App Server JSON RPC transport. Claude Code uses ACP over JSON RPC when the ACP command is available.
 
-The community bridge was a research lead, not a dependency. Its repository had no license file, so this project contains independent code.
+The normalized layer preserves native identity while adding a global provider label. A global identifier never replaces a provider native identifier.
+
+The workflow layer stores work, evidence, handoffs, reviews, and verification results. State is persisted atomically in the user application data directory. A custom path can be selected with `INTEROP_STATE_FILE`.
+
+The MCP layer exposes compact discovery, control, observation, coordination, evidence, and permission tools. Unsupported operations fail clearly and are never emulated with terminal keystrokes.
+
+Evidence has explicit trust levels. Agent claims are weaker than provider observations. Runtime command results and direct repository inspection are recorded separately. The runtime never promotes one trust level silently.
 
 ```mermaid
 flowchart LR
-  Client[MCP client] --> Stdio[freebuff-mcp stdio]
-  Stdio --> Runtime[Capability driven runtime]
-  Runtime --> Desktop[Freebuff Desktop dynamic localhost orchestrator]
-  Runtime --> CLI[Freebuff CLI managed PTY]
-  Runtime --> Files[Approved project roots]
+  Client[MCP client] --> Northbound[Compact MCP surface]
+  Northbound --> Registry[Interop registry]
+  Registry --> Freebuff[Freebuff bridge]
+  Registry --> OpenCode[OpenCode HTTP server]
+  Registry --> Codex[Codex App Server JSON RPC]
+  Registry --> Claude[Claude ACP JSON RPC]
+  Registry --> Evidence[Durable evidence store]
+  Evidence --> Verify[Deterministic verifier]
+  Verify --> Git[Repository evidence]
 ```
+
+## Recovery behavior
+
+Provider sessions retain their native identifiers. Native event streams are live observations and are not falsely replayed after a process restart. Durable work and evidence are written with a temporary file and rename so a process interruption cannot leave a partially written state file.
+
+## Authority boundaries
+
+Reviewers receive evidence and may return findings. A reviewer does not gain write access to the subject session through a review request. Remediation is sent to the exact originating session only when the caller explicitly chooses that native session.

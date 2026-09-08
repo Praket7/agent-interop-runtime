@@ -1,19 +1,16 @@
 # Compatibility
 
-| Capability | Status in this build |
-| --- | --- |
-| Node.js runtime | Node 20 or newer |
-| MCP stdio | Implemented |
-| Desktop dynamic `/api/*` discovery | Readiness metadata, platform logs, and native listener fallback |
-| Projects, threads, visible messages | Implemented and live verified |
-| Safe project file reads | Implemented; shallow file listing and bounded reads |
-| Model, stop, resume writes | Enabled only after dynamic Desktop launch-ID verification; CLI writes use managed PTY |
-| Attachments | Not yet implemented |
-| Authenticated Streamable HTTP relay | Implemented, loopback by default |
-| Cloudflare deployment | Optional only for remote HTTP access; not required for local use |
-| CLI PTY and local chat history | Implemented; CLI writes require the managed PTY |
-| Live Freebuff Desktop write verification | `/healthz` launch-ID handshake; otherwise read-only |
-| Live Desktop progress | `/api/events` SSE with polling via `get_thread_progress` and bounded `watch_thread`; in-memory only |
-| Progress summaries | `get_thread_progress_summary` and `watch_active_threads`; user-facing phases and stale/error indicators |
-| Automatic Desktop readiness | Reads fresh port, launch ID, PID, and timestamp metadata; rejects stale records and retries live listener candidates |
-| Installer helper | `install` prints a current-path Codex entry; `install --write` appends without overwriting an existing entry |
+| Provider or surface | Discovery | Create and resume | Send and cancel | Events | Native diff | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Freebuff Desktop | Working | Resume working | Working after launch verification | Working through SSE | Not exposed by current bridge | Read only without launch authorization |
+| Freebuff CLI | Working | Managed PTY | Working for bridge owned sessions | PTY progress | Repository fallback | Uses the preserved Freebuff runtime |
+| OpenCode | Working when server is reachable | Working | Working through HTTP | Working through event stream | Working | Set `OPENCODE_SERVER_URL` for a non default port |
+| Codex App Server | Working when `codex app-server` responds | Working through thread start and resume | Working through turn start and interrupt | Live JSON RPC notifications | Not standardized | Native model and permission operations remain provider dependent |
+| Claude ACP | Working when the configured ACP command is available | Working through session new and load | Working through session prompt and cancel | Live JSON RPC notifications | Not standardized | Authentication and provider command remain user environment dependent |
+| Cursor | Not implemented | Not implemented | Not implemented | Not implemented | Not implemented | Reserved for a later adapter |
+
+Unavailable providers degrade to an explicit unavailable capability record. A provider executable being present does not imply that authentication or protocol initialization succeeded.
+
+## Verification classes
+
+The repository contains unit tests for normalization and security, mock protocol tests for Codex and Claude, workflow tests, deterministic verifier tests, and graceful degradation checks. Live provider tests are environment dependent and must be run only when the corresponding provider is installed and authenticated.
