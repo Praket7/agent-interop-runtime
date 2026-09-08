@@ -92,7 +92,7 @@ test('native adapters degrade honestly when their process cannot be started', as
   const caps = await adapter.capabilities();
   assert.equal(caps.discovery.supported, false);
   assert.equal(caps.discovery.state, 'unavailable');
-  assert.equal((await adapter.listSessions()).length, 0);
+  await assert.rejects(() => adapter.listSessions(), /not found|unavailable|ENOENT/i);
   const receipt = await adapter.send('missing', 'hello');
   assert.equal(receipt.accepted, false);
   assert.match(String((receipt.detail as { reason?: string })?.reason), /not found|unavailable|ENOENT/i);
