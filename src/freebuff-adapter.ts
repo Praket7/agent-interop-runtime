@@ -1,0 +1,15 @@
+import type { Json } from './types.js';
+import type { AgentAdapter, AgentCapabilities, AgentSession, OperationReceipt } from './interop.js';
+import type { Runtime } from './runtime.js';
+
+export class FreebuffAdapter implements AgentAdapter {
+  readonly id = 'freebuff' as const;
+  constructor(private readonly runtime: Runtime) {}
+  async capabilities(): Promise<AgentCapabilities> { const legacy = await this.runtime.capabilities(); const c = legacy as any; const available = Boolean(c.orchestrator || c.product === 'cli'); const write = !c.readOnly; const record = (supported: boolean, reason?: string) => ({ supported, state: supported ? 'available' as const : 'degraded' as const, transport: c.product === 'cli' ? 'managed PTY' : 'http', protocol: 'Freebuff native bridge', reason }); return { provider: this.id, adapterVersion: '0.1.0', providerVersion: c.version, authorization: write ? 'authorized' : available ? 'unknown' : 'unauthorized', discovery: record(available, available ? undefined : 'Freebuff was not discovered'), sessions: record(available), sendMessage: record(write, c.readOnly ? 'Read only mode' : undefined), steer: record(false, 'Freebuff exposes message send but not a separate steer contract'), cancel: record(write), events: record(available), diff: record(false, 'Native diff route is not exposed by the current bridge'), permissions: record(false, 'Permission response route is not exposed by the current bridge'), model: record(write), reasoning: record(write), limitations: ['Desktop writes require the verified launch ID handshake', 'The adapter preserves the existing Freebuff bridge behavior'] }; }
+  async listSessions(): Promise<AgentSession[]> { const threads = await this.runtime.listThreads(); return threads.map((t) => ({ ...t, id: `freebuff:${t.id}`, nativeId: t.id, provider: this.id, transport: 'native bridge', provenance: { discoveredAt: new Date().toISOString(), source: 'Freebuff runtime', native: true } })); }
+  async getSession(nativeId: string): Promise<AgentSession | null> { const t = await this.runtime.getThread(nativeId); return { ...t, id: `freebuff:${nativeId}`, nativeId, provider: this.id, transport: 'native bridge', provenance: { discoveredAt: new Date().toISOString(), source: 'Freebuff runtime', native: true } }; }
+  async send(nativeId: string, text: string): Promise<OperationReceipt> { return { provider: this.id, nativeId, operation: 'send', accepted: true, detail: await this.runtime.sendMessage(nativeId, text) }; }
+  async cancel(nativeId: string): Promise<OperationReceipt> { return { provider: this.id, nativeId, operation: 'cancel', accepted: true, detail: await this.runtime.stop(nativeId) }; }
+  async setModel(nativeId: string, model: string): Promise<OperationReceipt> { return { provider: this.id, nativeId, operation: 'set_model', accepted: true, detail: await this.runtime.setModel(nativeId, model) }; }
+  async setReasoning(nativeId: string, effort: string): Promise<OperationReceipt> { return { provider: this.id, nativeId, operation: 'set_reasoning', accepted: true, detail: await this.runtime.setReasoning(nativeId, effort) }; }
+}

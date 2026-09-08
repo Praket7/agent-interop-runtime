@@ -1,17 +1,15 @@
 {
-  "name": "freebuff-mcp",
-  "version": "0.1.5",
-  "description": "A secure MCP bridge for locally installed Freebuff Desktop and CLI sessions.",
-  "keywords": ["mcp", "freebuff", "codex", "ai", "cli"],
-  "repository": { "type": "git", "url": "https://github.com/Praket7/freebuff-mcp.git" },
-  "homepage": "https://github.com/Praket7/freebuff-mcp#readme",
-  "bugs": { "url": "https://github.com/Praket7/freebuff-mcp/issues" },
+  "name": "agent-interop-runtime",
+  "version": "0.1.0",
+  "description": "A capability graded MCP runtime for live coding agent sessions.",
+  "keywords": ["mcp", "agents", "interop", "codex", "opencode", "claude"],
+  "repository": { "type": "git", "url": "https://github.com/Praket7/agent-interop-runtime.git" },
+  "homepage": "https://github.com/Praket7/agent-interop-runtime#readme",
+  "bugs": { "url": "https://github.com/Praket7/agent-interop-runtime/issues" },
   "license": "MIT",
   "publishConfig": { "access": "public" },
   "type": "module",
-  "bin": {
-    "freebuff-mcp": "dist/src/cli.js"
-  },
+  "bin": { "agent-interop-runtime": "dist/src/cli.js", "freebuff-mcp": "dist/src/cli.js" },
   "files": [
     "dist/src",
     "README.md",

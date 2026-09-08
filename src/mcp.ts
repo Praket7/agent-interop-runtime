@@ -5,8 +5,13 @@ import { createServer as createHttpServer, IncomingMessage, ServerResponse } fro
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { detectRuntime, Runtime } from './runtime.js';
+import { OpenCodeAdapter, CodexAdapter, ClaudeCodeAdapter } from './adapters.js';
+import { FreebuffAdapter } from './freebuff-adapter.js';
+import { InteropRegistry } from './interop-runtime.js';
+import type { ProviderId } from './interop.js';
 
-export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'freebuff-mcp',version:'0.1.5'});
+export function createInteropRegistry(runtime: Runtime): InteropRegistry { return new InteropRegistry().register(new FreebuffAdapter(runtime)).register(new OpenCodeAdapter()).register(new CodexAdapter()).register(new ClaudeCodeAdapter()); }
+export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:'0.1.0'}); const interop=createInteropRegistry(runtime);
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities());
   read('list_projects','List discovered Freebuff projects.',{},()=>runtime.listProjects());
@@ -21,6 +26,10 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   read('list_project_files','List safe project files.',{projectId:z.string(),relative:z.string().optional()},(a)=>runtime.listFiles(a.projectId,a.relative));
   read('read_project_file','Read one safe project file.',{projectId:z.string(),path:z.string()},(a)=>runtime.readFile(a.projectId,a.path));
   read('list_models','List models exposed by the installed bridge.',{},()=>runtime.listModels());
+  read('list_agents','List provider adapters and their real capability grades.',{},()=>interop.capabilities());
+  read('list_agent_sessions','Discover native sessions across configured providers.',{provider:z.enum(['freebuff','opencode','codex','claude-code']).optional()},(a)=>interop.listSessions(a.provider as ProviderId|undefined));
+  read('get_work_graph','Return the provider independent session and evidence graph.',{},()=>interop.graph());
+  read('get_agent_diff','Read native diff evidence while preserving provider identity.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string()},(a)=>interop.diff(a.provider as ProviderId,a.nativeId));
   if (!includeWrites) return s;
   const write=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   write('send_message','Send a text prompt to an existing Freebuff thread.',{threadId:z.string(),text:z.string().min(1).max(100000)},(a)=>runtime.sendMessage(a.threadId,a.text));
@@ -28,6 +37,8 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   write('resume_thread','Resume a paused Freebuff thread.',{threadId:z.string()},(a)=>runtime.resume(a.threadId));
   write('set_model','Set the model for an existing thread when supported.',{threadId:z.string(),model:z.string().min(1),harnessId:z.string().optional()},(a)=>runtime.setModel(a.threadId,a.model,a.harnessId));
   write('set_reasoning','Set the reasoning effort for an existing thread when supported.',{threadId:z.string(),effort:z.string().nullable()},(a)=>runtime.setReasoning(a.threadId,a.effort));
+  write('agent_send','Send a message to a provider native session.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string(),text:z.string().min(1).max(100000),mode:z.enum(['send','steer']).optional()},(a)=>interop.send(a.provider as ProviderId,a.nativeId,a.text,a.mode ?? 'send'));
+  write('agent_cancel','Cancel work in a provider native session.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string()},(a)=>interop.cancel(a.provider as ProviderId,a.nativeId));
   return s; }
 export async function runStdio(){const runtime=await detectRuntime();const server=createServer(runtime,!(await runtime.capabilities()).readOnly);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }

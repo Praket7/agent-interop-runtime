@@ -1,131 +1,70 @@
-# freebuff-mcp
+# Agent Interop Runtime
 
-An MCP bridge for a locally installed and signed-in Freebuff CLI or Desktop installation. It gives an MCP client bounded access to Freebuff sessions, local CLI history, live CLI output, and safe project-file reads.
+Agent Interop Runtime gives MCP clients one careful doorway into live coding agent sessions.
 
-## Requirements
+It keeps each provider identity intact. Freebuff remains the first class native bridge. OpenCode can use its local server. Codex and Claude Code are discovered without pretending that a terminal process is a live protocol session.
 
-- Windows, macOS, or Linux
-- Node.js 20 or newer
-- Freebuff CLI or Desktop installed and signed in
-- Codex CLI or another MCP-compatible client
+## What it does
 
-The bridge uses the Freebuff installation on the same computer. It does not share credentials or expose your chats to other users.
+The runtime can discover providers and native sessions, grade their capabilities, send work where a supported transport exists, cancel active work, read native diffs, and retain evidence about where every result came from.
 
-## Install from npm
+The first version includes
 
-```bash
-npm install --global freebuff-mcp
-freebuff-mcp doctor
-```
+* Freebuff Desktop and CLI through the preserved native bridge
+* OpenCode server discovery with sessions, prompts, cancellation, and diffs
+* Codex App Server readiness discovery
+* Claude Code and ACP readiness discovery
+* A provider neutral session and evidence graph
+* MCP tools for discovery, messaging, cancellation, capability review, and evidence
+* Read only degradation when authorization or a native transport is unavailable
 
-The package includes its compiled runtime files. No local build is required for npm users.
+## Install
 
-## Configure Codex for Desktop-first discovery
-
-By default the bridge probes the locally running Freebuff Desktop first, then falls back to the CLI if Desktop is unavailable. This requires no CLI-mode flag:
-
-```toml
-[mcp_servers.freebuff]
-command = 'freebuff-mcp'
-args = ['serve']
-enabled = true
-```
-
-Desktop discovery reads dynamic port/launch metadata when Freebuff exposes a readiness file, then verifies the launch ID through `/healthz`. If that handshake is unavailable, it stays read-only. Use the explicit CLI configuration below when you need bridge-owned prompt injection.
-
-## Configure Codex for explicit Freebuff CLI mode
-
-Add this server to `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows):
-
-```toml
-[mcp_servers.freebuff]
-command = 'freebuff-mcp'
-args = ['serve']
-enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
-# Set this when two project roots share the same basename.
-# FREEBUFF_PROJECT_KEY = 'FreeBuff WORK'
-```
-
-On macOS or Linux, use the same block and set the root to a Unix path such as `/Users/YOUR_NAME/Desktop/freebuff-work`.
-
-Restart Codex and ask it to call `freebuff_status`, then `list_threads`.
-
-Run `freebuff-mcp install` to print a ready-to-paste configuration using the current executable, or `freebuff-mcp install --write` to append the Desktop-first entry to `%USERPROFILE%\\.codex\\config.toml` (or `~/.codex/config.toml`). The write mode refuses to overwrite an existing `freebuff` entry.
-
-CLI mode can start a managed Freebuff session, inject prompts, monitor live output, discover the local conversation ID, resume persisted CLI chats, read visible history, list safe project files, and read individual project files. Reasoning changes are supported through Freebuff slash commands. Model changes require Freebuff's interactive new-session model picker.
-
-### Live Desktop progress
-
-When Desktop is discovered, the bridge subscribes to its read-only `/api/events` stream. Use `get_thread_progress` with a thread ID to poll bounded, in-memory progress events. Pass `afterSequence` from the previous response for incremental reads. `watch_thread` provides bounded long-polling for up to 30 seconds. These views can show turn state, assistant updates, tools, command summaries, file changes, and completion/failure while a task is running. `get_thread` remains the saved snapshot and may include a `live` summary; event history is intentionally not persisted. CLI mode reports Desktop live events as unavailable and continues to expose PTY output.
-
-For a simpler view, call `get_thread_progress_summary`. It reports the current phase (Planning, Reading files, Running tests, Editing files, Reviewing changes, Waiting for input, Completed, or Failed), latest meaningful update, active tool/command, changed files, last error, seconds since the last event, and whether the stream is stale. `watch_active_threads` returns the latest summary for every active Desktop thread. Detailed reasoning deltas are omitted by default.
-
-## Run directly with npx
-
-The same server can be configured without a global install:
-
-```toml
-[mcp_servers.freebuff]
-command = 'npx'
-args = ['-y', 'freebuff-mcp@latest', 'serve']
-enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
-```
-
-## Build from GitHub
-
-For development or a local source build, build it from GitHub:
-
-```bash
-git clone https://github.com/Praket7/freebuff-mcp.git
-cd freebuff-mcp
+```text
 pnpm install
 pnpm build
+node dist/src/cli.js doctor
+node dist/src/cli.js serve
 ```
 
-Then point Codex at `dist/src/cli.js`:
+The original Freebuff project is not modified by this repository.
+
+## MCP configuration
 
 ```toml
-[mcp_servers.freebuff]
+[mcp_servers.agent_interop]
 command = 'node'
-args = ['C:\path\to\freebuff-mcp\dist\src\cli.js', 'serve']
+args = ['C:\\path\\to\\agent-interop-runtime\\dist\\src\\cli.js', 'serve']
 enabled = true
-
-[mcp_servers.freebuff.env]
-FREEBUFF_MCP_CLI_MODE = 'pty'
-FREEBUFF_PROJECT_ROOT = 'C:\Users\YOUR_NAME\Documents\FreeBuff WORK'
 ```
 
-## Optional HTTP transport
+OpenCode can be found at its local server URL. Set `OPENCODE_SERVER_URL` when its port is different from the default.
 
-You do not need HTTP or Cloudflare for local Codex use. Stdio is the safer default. Use HTTP only when another MCP client must reach this bridge.
+## MCP surface
 
-```bash
-$env:FREEBUFF_MCP_TOKEN = '<long-random-value>' # PowerShell
-freebuff-mcp serve-http
-```
+Read tools include `list_agents`, `list_agent_sessions`, `get_work_graph`, `get_agent_diff`, `freebuff_status`, and the existing Freebuff inspection tools.
 
-On macOS/Linux, use `export FREEBUFF_MCP_TOKEN='<long-random-value>'` before starting it. It listens on `127.0.0.1:8788` by default, and `/mcp` always requires `Authorization: Bearer <token>`. Non-loopback binding is refused unless `FREEBUFF_MCP_ALLOW_REMOTE=1`; if enabled, use a trusted HTTPS tunnel or private VPN and never expose the port directly to the Internet.
+Write tools include `agent_send` and `agent_cancel` when the selected provider reports support. Provider capability output is the source of truth.
 
-### Cloudflare is optional
+## Design
 
-Cloudflare is only one possible HTTPS tunnel for remote access. It is not required for local use, npm publication, GitHub, or Desktop discovery. Use it only if you specifically want a Cloudflare-managed hostname for the authenticated HTTP bridge.
+The runtime uses a small common contract for sessions, operations, events, diffs, permissions, and model controls. The common layer is intentionally narrower than any provider. Native identifiers and provenance stay attached to every normalized session and evidence record.
 
-## Development and verification
+The evidence model separates native facts from observations and independent verification. It never treats a message that says a file changed as proof that the file changed.
 
-```bash
-pnpm install
+## Verification
+
+```text
 pnpm typecheck
 pnpm test
 pnpm build
 pnpm pack:check
 ```
 
-The bridge rejects unsafe identifiers and paths, redacts credential-like fields, and never returns Freebuff credentials.
+## Security
+
+Local HTTP binds to loopback by default and requires a bearer token. Remote binding requires an explicit opt in. Credentials and authorization headers are redacted from returned data. Provider adapters do not upload local files or copy secrets into the repository.
+
+## Status
+
+Freebuff and OpenCode have working local control paths. Codex and Claude Code report honest readiness until their supported native session transport is connected. Cursor is intentionally reserved for a later adapter.
