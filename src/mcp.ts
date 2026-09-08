@@ -61,7 +61,7 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   write('work_verify','Run deterministic verification and capture repository evidence.',{workId:z.string(),cwd:z.string().optional(),commands:z.array(z.string()).min(1)},(a)=>withWorkflow(()=>workflow.verify(a.workId,a.cwd ?? process.cwd(),a.commands)));
   read('work_graph','Read the durable work, handoff, review, and evidence graph.',{},()=>withWorkflow(async()=>workflow.graph(await interop.listSessions())));
   return s; }
-export async function runStdio(){const runtime=await detectRuntime();const server=createServer(runtime,!(await runtime.capabilities()).readOnly);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
+export async function runStdio(){const runtime=await detectRuntime();const readOnly=(await runtime.capabilities()).readOnly || process.env.INTEROP_READ_ONLY === '1';const server=createServer(runtime,!readOnly);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }
 function authorized(req: IncomingMessage): boolean {
   const expected = process.env.FREEBUFF_MCP_TOKEN;
@@ -86,7 +86,7 @@ export async function runHttp(): Promise<void> {
     if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
     try {
-      const mcp = createServer(runtime, !(await runtime.capabilities()).readOnly);
+      const mcp = createServer(runtime, !(await runtime.capabilities()).readOnly && process.env.INTEROP_READ_ONLY !== '1');
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await mcp.connect(transport);
       await transport.handleRequest(req, res, await body(req));
