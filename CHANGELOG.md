@@ -4,6 +4,10 @@
 
 - Prepare the first public npm and MCP Registry release.
 
+## 0.2.2
+
+- Keep the CLI and MCP protocol version aligned with the published package.
+
 ## 0.2.0
 
 - Add npm and official MCP Registry metadata for universal pnpm and npx installation.

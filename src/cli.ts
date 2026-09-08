@@ -6,6 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createInteropRegistry } from './mcp.js';
 import { WorkflowStore } from './workflow.js';
+import { VERSION } from './version.js';
 const command=process.argv[2] ?? 'serve';
 async function installConfig(write: boolean): Promise<void> {
   const executable = path.resolve(process.argv[1] ?? 'agent-interop-runtime');
@@ -22,5 +23,5 @@ else if(command==='sessions'){const r=await detectRuntime();const registry=creat
 else if(command==='work'){const store=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json'));await store.load();const sub=process.argv[3] ?? 'list';if(sub==='list')console.log(JSON.stringify(await store.listWorks(),null,2));else if(sub==='evidence')console.log(JSON.stringify(await store.listEvidence(process.argv[4]),null,2));else if(sub==='verify'){const workId=process.argv[4];const commands=process.argv.slice(5);if(!workId||!commands.length)throw new Error('Usage: agent-interop-runtime work verify <workId> <command> [command...]');console.log(JSON.stringify(await store.verify(workId,process.cwd(),commands),null,2));}else throw new Error('Usage: agent-interop-runtime work [list|evidence <workId>|verify <workId> <command> ...]');}
 else if(command==='serve'){await runStdio();}
 else if(command==='serve-http'){await runHttp();}
-else if(command==='version'){console.log('0.1.0');}
+else if(command==='version'){console.log(VERSION);}
 else {console.error('Usage: agent-interop-runtime [serve|serve-http|doctor|agents|sessions|work|install [--write]|version]');process.exitCode=2;}

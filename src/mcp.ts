@@ -14,9 +14,10 @@ import { WorkflowStore } from './workflow.js';
 import { repositoryDiff } from './verification.js';
 import os from 'node:os';
 import path from 'node:path';
+import { VERSION } from './version.js';
 
 export function createInteropRegistry(runtime: Runtime): InteropRegistry { return new InteropRegistry().register(new FreebuffAdapter(runtime)).register(new OpenCodeAdapter()).register(new CodexAdapter()).register(new ClaudeCodeAdapter()); }
-export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:'0.1.0'}); const interop=createInteropRegistry(runtime); const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const ready=workflow.load();
+export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:VERSION}); const interop=createInteropRegistry(runtime); const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const ready=workflow.load();
   const withWorkflow = <T>(fn: () => Promise<T>) => ready.then(fn);
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities());
