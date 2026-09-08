@@ -67,13 +67,19 @@ For a storage or repository analysis, enable the read only entry with `INTEROP_R
 
 For trusted Codex work sessions that should run repository checks, also add `INTEROP_ALLOW_VERIFICATION = '1'`. Verification remains disabled by default because it launches local commands.
 
-OpenCode can be found at its local server URL. Set `OPENCODE_SERVER_URL` when its port is different from the default.
+OpenCode uses its local server at `http://127.0.0.1:4096` by default. Start it with `opencode serve --hostname 127.0.0.1 --port 4096` or set `OPENCODE_SERVER_URL` when its port is different. Remote OpenCode servers require `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`.
 
 ## MCP surface
 
 Read tools include `list_agents`, `list_agent_sessions`, `get_work_graph`, `get_agent_diff`, `freebuff_status`, and the existing Freebuff inspection tools.
 
-Write tools include `agent_send` and `agent_cancel` when the selected provider reports support. Provider capability output is the source of truth.
+Write tools include `agent_send` and `agent_cancel` when the runtime is not globally read only and the selected provider reports support. OpenCode reports a successful prompt as queued after the HTTP server accepts it. Completion must be observed through events or a later session read. `agent_send` accepts optional `model` and provider `variant` values.
+
+`list_agent_sessions` returns both `sessions` and `providerErrors`. An unavailable provider is never represented as an empty successful result.
+
+The HTTP transport keeps MCP sessions in memory between requests. It requires a session identifier after initialization and supports the MCP delete request for cleanup.
+
+Run `agent-interop-runtime install --write` repeatedly when needed. The installer replaces only the Agent Interop configuration section and leaves unrelated configuration intact.
 
 ## Design
 

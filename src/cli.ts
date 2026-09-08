@@ -8,11 +8,19 @@ import { createInteropRegistry } from './mcp.js';
 import { WorkflowStore } from './workflow.js';
 import { VERSION } from './version.js';
 const command=process.argv[2] ?? 'serve';
+function mergeConfig(existing: string, config: string): string {
+  const lines = existing.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\[mcp_servers\.agent_interop(?:\.[^\]]+)?\]\s*$/.test(line.trim()));
+  if (start < 0) return `${existing && !existing.endsWith('\n') ? `${existing}\n` : existing}${config}`;
+  let end = start + 1;
+  while (end < lines.length && !/^\[[^\]]+\]\s*$/.test((lines[end] ?? '').trim())) end++;
+  return [...lines.slice(0, start), config.trim(), ...lines.slice(end)].join('\n').replace(/\n{3,}/g, '\n\n');
+}
 async function installConfig(write: boolean): Promise<void> {
   const launcher = process.platform === 'win32' ? 'npx.cmd' : 'npx';
   const config = `[mcp_servers.agent_interop]\ncommand = '${launcher}'\nargs = ['-y', 'agent-interop-runtime@latest', 'serve']\nenabled = true\n\n# Optional safe read-only entry for analysis sessions:\n# [mcp_servers.agent_interop_readonly]\n# command = '${launcher}'\n# args = ['-y', 'agent-interop-runtime@latest', 'serve']\n# enabled = true\n# [mcp_servers.agent_interop_readonly.env]\n# INTEROP_READ_ONLY = '1'\n\n# Optional trusted local verification authorization:\n# [mcp_servers.agent_interop.env]\n# INTEROP_ALLOW_VERIFICATION = '1'\n`;
   const configPath = path.join(os.homedir(), '.codex', 'config.toml');
-  if (write) { let existing = ''; try { existing = await fs.readFile(configPath, 'utf8'); } catch { /* create below */ } if (/^\[mcp_servers\.agent_interop\]/m.test(existing)) throw new Error(`MCP entry already exists in ${configPath}; no changes made`); await fs.mkdir(path.dirname(configPath), { recursive:true }); await fs.appendFile(configPath, `${existing && !existing.endsWith('\n') ? '\n' : ''}${config}`, 'utf8'); console.log(`Added Agent Interop configuration to ${configPath}`); } else { console.log(config); console.log(`Run 'agent-interop-runtime install --write' to add it to ${configPath}, then restart the local MCP client.`); }
+  if (write) { let existing = ''; try { existing = await fs.readFile(configPath, 'utf8'); } catch { /* create below */ } await fs.mkdir(path.dirname(configPath), { recursive:true }); await fs.writeFile(configPath, mergeConfig(existing, config), 'utf8'); console.log(`Installed or repaired Agent Interop configuration in ${configPath}`); } else { console.log(config); console.log(`Run 'agent-interop-runtime install --write' to add or repair it in ${configPath}, then restart the local MCP client.`); }
 }
 if(command==='install'||command==='setup'){await installConfig(process.argv.includes('--write'));}
 else if(command==='doctor'){const r=await detectRuntime();const registry=createInteropRegistry(r);console.log(JSON.stringify({capabilities:await r.capabilities(),providers:await registry.capabilities(),installation:await localInstallInfo()},null,2));registry.dispose();r.dispose?.();}

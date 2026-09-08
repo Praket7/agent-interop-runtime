@@ -73,3 +73,9 @@ test('read-only servers omit mutation tools', () => {
   assert.equal(tools.includes('send_message'), false);
   assert.equal(tools.includes('set_model'), false);
 });
+
+test('provider read-only status does not hide unrelated provider mutation tools', () => {
+  const runtime = { capabilities: async () => ({ product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[] }), listProjects:async()=>[], listThreads:async()=>[], getThread:async()=>({}), getMessages:async()=>[], activeWork:async()=>[], listFiles:async()=>[], readFile:async()=>({path:'',content:''}), sendMessage:async()=>({}), stop:async()=>({}), resume:async()=>({}), listModels:async()=>({}), setModel:async()=>({}), setReasoning:async()=>({}) } as any;
+  const tools = Object.keys((createServer(runtime, true) as any)._registeredTools);
+  assert.equal(tools.includes('agent_send'), true);
+});

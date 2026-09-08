@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.5
+
+This release completes the audit hardening pass.
+
+OpenCode now handles empty successful responses, authenticates remote servers, validates discovery payloads, reconnects event streams, preserves monotonic event sequences, and reports prompt delivery as queued rather than completed.
+
+Provider failures now remain visible beside successful session discovery. HTTP MCP sessions persist across requests and support clean deletion. Configuration installation is safe to repeat and repairs existing entries. Corrupt workflow state is preserved for recovery instead of being silently discarded.
+
 ## 0.2.4
 
 - Keep healthy provider sessions discoverable when another provider is unavailable.

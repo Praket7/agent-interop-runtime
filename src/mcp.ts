@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer as createHttpServer, IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { detectRuntime, Runtime } from './runtime.js';
 import { OpenCodeAdapter, CodexAdapter, ClaudeCodeAdapter } from './adapters.js';
@@ -34,8 +35,8 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   read('read_project_file','Read one safe project file.',{projectId:z.string(),path:z.string()},(a)=>runtime.readFile(a.projectId,a.path));
   read('list_models','List models exposed by the installed bridge.',{},()=>runtime.listModels());
   read('list_agents','List provider adapters and their real capability grades.',{},()=>interop.capabilities());
-  read('list_agent_sessions','Discover native sessions across configured providers.',{provider:z.enum(['freebuff','opencode','codex','claude-code']).optional()},(a)=>interop.listSessions(a.provider as ProviderId|undefined));
-  read('get_work_graph','Return the provider independent session and evidence graph.',{},()=>withWorkflow(async()=>workflow.graph(await interop.listSessions())));
+  read('list_agent_sessions','Discover native sessions across configured providers. Provider failures are returned separately from an empty session list.',{provider:z.enum(['freebuff','opencode','codex','claude-code']).optional()},async(a)=>({sessions:await interop.listSessions(a.provider as ProviderId|undefined),providerErrors:interop.getSessionErrors()}));
+  read('get_work_graph','Return the provider independent session and evidence graph, including any durable state recovery warning.',{},()=>withWorkflow(async()=>({...(await workflow.graph(await interop.listSessions())),stateRecoveryRequired:workflow.recoveryStatus()})));
   read('get_agent_diff','Read native diff evidence while preserving provider identity.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string()},(a)=>interop.diff(a.provider as ProviderId,a.nativeId));
   read('events_read','Read bounded native events while preserving provider identity.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string(),limit:z.number().int().min(1).max(100).optional()},(a)=>interop.readEvents(a.provider as ProviderId,a.nativeId,a.limit ?? 50));
   read('evidence_list','List evidence captured by the runtime.',{workId:z.string().optional()},(a)=>withWorkflow(()=>workflow.listEvidence(a.workId)));
@@ -48,7 +49,7 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   write('resume_thread','Resume a paused Freebuff thread.',{threadId:z.string()},(a)=>runtime.resume(a.threadId));
   write('set_model','Set the model for an existing thread when supported.',{threadId:z.string(),model:z.string().min(1),harnessId:z.string().optional()},(a)=>runtime.setModel(a.threadId,a.model,a.harnessId));
   write('set_reasoning','Set the reasoning effort for an existing thread when supported.',{threadId:z.string(),effort:z.string().nullable()},(a)=>runtime.setReasoning(a.threadId,a.effort));
-  write('agent_send','Send a message to a provider native session.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string(),text:z.string().min(1).max(100000),mode:z.enum(['send','steer']).optional()},(a)=>interop.send(a.provider as ProviderId,a.nativeId,a.text,a.mode ?? 'send'));
+  write('agent_send','Send a message to a provider native session. For OpenCode, accepted means transport queued the prompt and does not mean completion.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string(),text:z.string().min(1).max(100000),mode:z.enum(['send','steer']).optional(),model:z.string().optional(),variant:z.string().optional()},(a)=>interop.send(a.provider as ProviderId,a.nativeId,a.text,a.mode ?? 'send',{model:a.model,variant:a.variant}));
   write('agent_cancel','Cancel work in a provider native session.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string()},(a)=>interop.cancel(a.provider as ProviderId,a.nativeId));
   write('session_create','Create a native provider session when supported.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),cwd:z.string().optional(),title:z.string().optional()},(a)=>interop.create(a.provider as ProviderId,{cwd:a.cwd,title:a.title}));
   write('session_resume','Resume or reattach to an exact native session.',{provider:z.enum(['freebuff','opencode','codex','claude-code']),nativeId:z.string()},(a)=>interop.resume(a.provider as ProviderId,a.nativeId));
@@ -60,9 +61,8 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   write('review_create','Record an independent structured review and preserve its provenance.',{workId:z.string(),subjectEvidenceIds:z.array(z.string()),reviewerSessionId:z.string(),independence:z.object({differentSession:z.boolean(),differentProvider:z.boolean(),freshContext:z.boolean(),writeAccess:z.boolean()}),findings:z.array(z.object({id:z.string(),severity:z.enum(['blocking','major','minor','note']),title:z.string(),detail:z.string(),file:z.string().optional(),line:z.number().int().optional()})),verdict:z.enum(['approve','changes_requested','blocked'])},(a)=>withWorkflow(()=>workflow.createReview(a)));
   write('review_request','Send an evidence backed review request to an exact reviewer session and record the handoff.',{workId:z.string(),subjectProvider:z.enum(['freebuff','opencode','codex','claude-code']),subjectNativeId:z.string(),reviewerProvider:z.enum(['freebuff','opencode','codex','claude-code']),reviewerNativeId:z.string(),objective:z.string(),acceptanceCriteria:z.array(z.string())},(a)=>withWorkflow(async()=>{ let diff: Json; let trust: 'provider_observed' | 'repository_verified' = 'provider_observed'; try { diff=await interop.diff(a.subjectProvider as ProviderId,a.subjectNativeId) ?? null; } catch { diff=await repositoryDiff(process.cwd()) as unknown as Json; trust='repository_verified'; } const evidence=await workflow.addEvidence({workId:a.workId,sessionId:`${a.subjectProvider}:${a.subjectNativeId}`,kind:'diff',trust,source:{adapter:a.subjectProvider},summary:trust === 'provider_observed' ? 'Subject native diff for review' : 'Repository diff fallback for review',data:diff}); const handoff=await workflow.createHandoff({workId:a.workId,sourceSession:`${a.subjectProvider}:${a.subjectNativeId}`,destinationSession:`${a.reviewerProvider}:${a.reviewerNativeId}`,objective:a.objective,acceptanceCriteria:a.acceptanceCriteria,evidenceIds:[evidence.id],changedFiles:[],risks:[],unresolvedQuestions:[],authorityBoundaries:['Reviewer may report findings but may not mutate the subject session']}); const receipt=await interop.send(a.reviewerProvider as ProviderId,a.reviewerNativeId,`Review work ${a.workId}. Objective ${a.objective}. Acceptance criteria ${JSON.stringify(a.acceptanceCriteria)}. Evidence ${JSON.stringify({evidenceId:evidence.id,diff})}`); return {handoff,evidence,receipt}; }));
   write('work_verify','Run deterministic verification and capture repository evidence. Requires INTEROP_ALLOW_VERIFICATION=1 because commands execute locally.',{workId:z.string(),cwd:z.string().optional(),commands:z.array(z.string()).min(1)},(a)=>withWorkflow(()=>{ if (process.env.INTEROP_ALLOW_VERIFICATION !== '1') throw new Error('Verification is disabled by default; set INTEROP_ALLOW_VERIFICATION=1 only for a trusted local MCP client'); return workflow.verify(a.workId,a.cwd ?? process.cwd(),a.commands); }));
-  read('work_graph','Read the durable work, handoff, review, and evidence graph.',{},()=>withWorkflow(async()=>workflow.graph(await interop.listSessions())));
   return s; }
-export async function runStdio(){const runtime=await detectRuntime();const readOnly=(await runtime.capabilities()).readOnly || process.env.INTEROP_READ_ONLY === '1';const server=createServer(runtime,!readOnly);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
+export async function runStdio(){const runtime=await detectRuntime();const server=createServer(runtime,process.env.INTEROP_READ_ONLY !== '1');const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }
 function authorized(req: IncomingMessage): boolean {
   const expected = process.env.FREEBUFF_MCP_TOKEN;
@@ -73,7 +73,8 @@ function authorized(req: IncomingMessage): boolean {
 }
 async function body(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) { chunks.push(Buffer.from(chunk)); if (Buffer.concat(chunks).length > 2_000_000) throw new Error('Request too large'); }
+  let total = 0;
+  for await (const chunk of req) { const value = Buffer.from(chunk); total += value.length; if (total > 2_000_000) throw new Error('Request too large'); chunks.push(value); }
   const raw = Buffer.concat(chunks).toString('utf8');
   return raw ? JSON.parse(raw) : undefined;
 }
@@ -82,16 +83,27 @@ export async function runHttp(): Promise<void> {
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
+  const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport }>();
   const server = createHttpServer(async (req, res) => {
-    if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:(await runtime.capabilities()).readOnly})); return; }
-    if (req.url !== '/mcp' || req.method !== 'POST') { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
+    if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:process.env.INTEROP_READ_ONLY === '1'})); return; }
+    if (req.url !== '/mcp' || !['POST', 'DELETE'].includes(req.method ?? '')) { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
     try {
-      const mcp = createServer(runtime, !(await runtime.capabilities()).readOnly && process.env.INTEROP_READ_ONLY !== '1');
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await mcp.connect(transport);
-      await transport.handleRequest(req, res, await body(req));
-      res.on('close', () => { void transport.close(); void mcp.close(); });
+      const sessionId = req.headers['mcp-session-id'];
+      let session = typeof sessionId === 'string' ? sessions.get(sessionId) : undefined;
+      if (req.method === 'DELETE') { if (!session) { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'unknown_session'})); return; } await session.transport.handleRequest(req, res); sessions.delete(sessionId as string); await session.transport.close(); await session.mcp.close(); return; }
+      const parsed = await body(req);
+      if (!session) {
+        if (typeof sessionId === 'string' || !parsed || typeof parsed !== 'object' || (parsed as { method?: string }).method !== 'initialize') { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'mcp_session_required'})); return; }
+        const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1');
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessionclosed: (closedId) => { sessions.delete(closedId); } });
+        await mcp.connect(transport);
+        session = { mcp, transport };
+        await transport.handleRequest(req, res, parsed);
+        if (transport.sessionId) sessions.set(transport.sessionId, session);
+        return;
+      }
+      await session.transport.handleRequest(req, res, parsed);
     } catch (error) {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
     }

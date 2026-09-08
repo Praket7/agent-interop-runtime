@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeCodeAdapter, CodexAdapter, type RpcRequest } from '../src/adapters.js';
+import { ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter, type RpcRequest } from '../src/adapters.js';
 
 function mockRpc(responses: Record<string, unknown>) {
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -59,4 +59,36 @@ test('native adapters degrade honestly when their process cannot be started', as
   const receipt = await adapter.send('missing', 'hello');
   assert.equal(receipt.accepted, false);
   assert.match(String((receipt.detail as { reason?: string })?.reason), /not found|unavailable|ENOENT/i);
+});
+
+test('OpenCode accepts a 204 prompt response without parsing JSON', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = async (input, init) => { requests.push({ url: String(input), init }); return new Response(null, { status: 204 }); };
+  try {
+    const adapter = new OpenCodeAdapter();
+    const receipt = await adapter.send('session-1', 'hello', { model: 'provider/model', variant: 'build' });
+    assert.equal(receipt.accepted, true);
+    assert.equal(receipt.status, 'queued');
+    const sent = JSON.parse(String(requests[0]?.init?.body));
+    assert.deepEqual(sent, { model: 'provider/model', agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('OpenCode rejects malformed session discovery instead of treating it as empty', async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ sessions: [] }), { status: 200 });
+  try { await assert.rejects(() => new OpenCodeAdapter().listSessions(), /malformed response/); }
+  finally { globalThis.fetch = previousFetch; }
+});
+
+test('OpenCode sends configured Basic Auth without exposing the password', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousUser = process.env.OPENCODE_SERVER_USERNAME;
+  const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  process.env.OPENCODE_SERVER_USERNAME = 'alice'; process.env.OPENCODE_SERVER_PASSWORD = 'secret';
+  let authorization = '';
+  globalThis.fetch = async (_input, init) => { authorization = String((init?.headers as Record<string, string>)?.authorization); return new Response(JSON.stringify({ healthy: true }), { status: 200 }); };
+  try { const caps = await new OpenCodeAdapter().capabilities(); assert.equal(caps.discovery.supported, true); assert.equal(authorization, `Basic ${Buffer.from('alice:secret').toString('base64')}`); }
+  finally { globalThis.fetch = previousFetch; if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME; else process.env.OPENCODE_SERVER_USERNAME = previousUser; if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD; else process.env.OPENCODE_SERVER_PASSWORD = previousPassword; }
 });
