@@ -91,7 +91,7 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
 }
 
 export class CodexAdapter extends NativeProtocolAdapter {
-  readonly id: ProviderId = 'codex'; readonly label = 'Codex'; readonly protocol = 'Codex App Server JSON RPC'; protected readonly defaultCommand = 'codex'; protected readonly defaultArgs = ['app-server'];
+  readonly id: ProviderId = 'codex'; readonly label = 'Codex'; readonly protocol = 'Codex App Server JSON RPC'; protected readonly defaultCommand = 'codex'; protected readonly defaultArgs = ['app-server', '--stdio'];
   constructor(options: NativeAdapterOptions = {}) { super({ ...options, command: options.command ?? process.env.CODEX_APP_SERVER_COMMAND }); }
   protected initialize() { return this.call('initialize', { clientInfo: { name: 'agent-interop-runtime', version: '0.2.0' }, capabilities: {} }); }
   protected async discover() { const result = record(await this.call('thread/list', {})); const threads = result.data ?? result.threads ?? result; return Array.isArray(threads) ? threads : []; }
