@@ -36,7 +36,20 @@ jobs:
       - name: Run checks
         run: pnpm lint && pnpm typecheck && pnpm test && pnpm build
 
+      - name: Check npm release state
+        id: npm_release
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          PUBLISHED="$(pnpm view "agent-interop-runtime@${VERSION}" version 2>/dev/null || true)"
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish package to npm
+        if: steps.npm_release.outputs.already_published != 'true'
         run: pnpm publish --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
