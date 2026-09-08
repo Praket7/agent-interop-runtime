@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Prepare the first public npm and MCP Registry release.
+
 ## 0.2.0
 
 - Add npm and official MCP Registry metadata for universal pnpm and npx installation.
