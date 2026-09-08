@@ -29,3 +29,10 @@ test('unsupported operations fail clearly instead of being emulated', async () =
   const registry = new InteropRegistry().register(adapter);
   await assert.rejects(() => registry.send('codex', 'thread-1', 'hello'), /does not support send/);
 });
+
+test('session discovery keeps healthy providers when one adapter fails', async () => {
+  const failing: AgentAdapter = { ...adapter, id: 'opencode', listSessions: async () => { throw new Error('server unavailable'); } };
+  const registry = new InteropRegistry().register(failing).register(adapter);
+  const sessions = await registry.listSessions();
+  assert.deepEqual(sessions.map((value) => value.provider), ['codex']);
+});

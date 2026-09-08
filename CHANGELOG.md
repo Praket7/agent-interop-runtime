@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Keep healthy provider sessions discoverable when another provider is unavailable.
+
 ## 0.2.3
 
 - Add an explicit setup alias that registers the published package in Codex config.

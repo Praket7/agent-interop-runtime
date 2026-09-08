@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "A capability graded MCP runtime for live coding agent sessions.",
   "keywords": ["mcp", "agents", "interop", "codex", "opencode", "claude"],
