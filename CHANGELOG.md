@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6
+
+Freebuff CLI mode now has executable checks, a real node-pty probe, explicit runtime diagnostics, and JSONL history support. Explicit CLI mode remains authoritative over Desktop discovery.
+
+OpenCode now sends structured model identities and keeps agent selection separate. Claude ACP now negotiates file and terminal access, discovers persisted sessions when supported, and applies model and thought level configuration through ACP methods.
+
 ## 0.2.5
 
 This release completes the audit hardening pass.

@@ -14,7 +14,9 @@ The adapter starts `codex app-server` when available and initializes through JSO
 
 ## Claude Code
 
-The adapter uses a configured ACP command, defaulting to `claude-code-acp`. It initializes ACP and uses `session/new`, `session/load`, `session/prompt`, and `session/cancel`. If the command is absent or initialization fails, capabilities are degraded with the exact reason.
+The adapter uses a configured ACP command, defaulting to `claude-code-acp`. It initializes ACP with file reading and terminal capabilities, uses `session/new`, `session/list`, `session/load`, `session/prompt`, and `session/cancel`, and applies model and thought level changes through ACP configuration methods when the agent advertises them. ACP history remains provider owned. A session list is available when the configured Claude ACP executable exposes `session/list`.
+
+Run `pnpm pty:probe` when Freebuff CLI startup reports `posix_spawnp failed`. The probe spawns the platform shell equivalent of `/bin/echo` through node-pty. A failure indicates a node-pty native runtime or executable permission problem, not a Freebuff login result. Rebuild node-pty with `pnpm rebuild node-pty` using the supported Node runtime and retry.
 
 ## Configuration
 

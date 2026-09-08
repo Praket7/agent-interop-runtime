@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "A capability graded MCP runtime for live coding agent sessions.",
   "keywords": ["mcp", "agents", "interop", "codex", "opencode", "claude"],
@@ -26,11 +26,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx test/**/*.test.ts tests/**/*.test.ts",
     "lint": "node scripts/lint.mjs",
+    "pty:probe": "pnpm build && node scripts/probe-pty.mjs",
     "mcp:validate": "node scripts/validate-mcp.mjs",
     "pack:check": "pnpm mcp:validate && pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20 <27"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

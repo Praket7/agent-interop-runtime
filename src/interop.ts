@@ -38,6 +38,7 @@ export interface AgentSession extends ThreadSummary {
 }
 
 export interface OperationReceipt { provider: ProviderId; nativeId: string; operation: string; accepted: boolean; status?: 'accepted' | 'queued' | 'completed' | 'rejected'; providerState?: string; detail?: Json; }
+export interface AgentSendOptions { model?: { providerID: string; modelID: string }; agent?: string; reasoning?: string; }
 export interface AgentEvent { provider: ProviderId; nativeId: string; sequence: number; timestamp: string; type: string; data: Json; }
 
 export interface AgentAdapter {
@@ -47,8 +48,8 @@ export interface AgentAdapter {
   getSession(nativeId: string): Promise<AgentSession | null>;
   createSession?(options: { cwd?: string; title?: string }): Promise<AgentSession>;
   resumeSession?(nativeId: string): Promise<AgentSession>;
-  send?(nativeId: string, text: string, options?: { model?: string; variant?: string }): Promise<OperationReceipt>;
-  steer?(nativeId: string, text: string, options?: { model?: string; variant?: string }): Promise<OperationReceipt>;
+  send?(nativeId: string, text: string, options?: AgentSendOptions): Promise<OperationReceipt>;
+  steer?(nativeId: string, text: string, options?: AgentSendOptions): Promise<OperationReceipt>;
   cancel?(nativeId: string): Promise<OperationReceipt>;
   events?(nativeId: string): AsyncIterable<AgentEvent>;
   getDiff?(nativeId: string): Promise<Json | null>;

@@ -5,6 +5,17 @@ import * as pty from 'node-pty';
 import { assertSafeId } from './security.js';
 
 export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; }
+export interface PtyDiagnostics { ok: boolean; node: string; platform: string; nodePty: string; error?: string; }
+
+export async function probePty(): Promise<PtyDiagnostics> {
+  const command = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/echo';
+  const args = process.platform === 'win32' ? ['/d', '/c', 'echo pty-probe'] : ['pty-probe'];
+  try {
+    const term = pty.spawn(command, args, { name: 'xterm-256color', cols: 80, rows: 24, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
+    const result = await new Promise<PtyDiagnostics>((resolve) => { let output = ''; const timer = setTimeout(() => { try { term.kill(); } catch {} resolve({ ok: false, node: process.version, platform: process.platform, nodePty: '1.1.0', error: 'PTY probe timed out' }); }, 1500); term.onData((data) => { output += data; }); term.onExit(({ exitCode }) => { clearTimeout(timer); resolve(exitCode === 0 ? { ok: true, node: process.version, platform: process.platform, nodePty: '1.1.0' } : { ok: false, node: process.version, platform: process.platform, nodePty: '1.1.0', error: `probe exited with code ${exitCode}; output ${output.slice(-200)}` }); }); });
+    return result;
+  } catch (error) { return { ok: false, node: process.version, platform: process.platform, nodePty: '1.1.0', error: error instanceof Error ? error.message : String(error) }; }
+}
 
 function cliCandidates(): string[] {
   const home = os.homedir();
@@ -13,7 +24,7 @@ function cliCandidates(): string[] {
 }
 
 export async function findFreebuffCli(): Promise<string | null> {
-  for (const candidate of cliCandidates()) { try { const stat = await fs.stat(candidate); if (stat.isFile()) return candidate; } catch { /* try next */ } }
+  for (const candidate of cliCandidates()) { try { const stat = await fs.stat(candidate); if (stat.isFile()) { if (process.platform !== 'win32') await fs.access(candidate, fs.constants.X_OK); return candidate; } } catch { /* try next */ } }
   return null;
 }
 
@@ -40,13 +51,15 @@ export class CliPtyManager {
   async start(id: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const safeId = assertSafeId(id);
     const existing = this.sessions.get(safeId);
-    if (existing) return { id: safeId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
+    if (existing && !existing.exited) return { id: safeId, conversationId: existing.conversationId, pid: existing.term.pid, output: existing.output, exited: existing.exited, exitCode: existing.exitCode };
+    if (existing?.exited) this.sessions.delete(safeId);
     const file = await findFreebuffCli();
     if (!file) throw new Error('FREEBUFF_CLI_NOT_INSTALLED');
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
     const startedAt = Date.now();
-    const term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
+    let term: pty.IPty;
+    try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw new Error(`FREEBUFF_PTY_START_FAILED: ${error instanceof Error ? error.message : String(error)}. Verify node-pty was rebuilt for ${process.version} with 'pnpm rebuild node-pty' and that the CLI is executable.`); }
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); });
@@ -60,6 +73,8 @@ export class CliPtyManager {
     }
     if (/Freebuff is already running/i.test(state.output) && !/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
     if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
+    if (state.exited) { this.sessions.delete(safeId); throw new Error(`FREEBUFF_CLI_EXITED: exit code ${state.exitCode ?? 'unknown'}`); }
+    if (!/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error(`FREEBUFF_CLI_STARTUP_TIMEOUT: interactive prompt was not detected. Output: ${state.output.slice(-500)}`); }
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
     return { id: safeId, conversationId: state.conversationId, pid: term.pid, output: state.output, exited: state.exited, exitCode: state.exitCode };
   }

@@ -50,6 +50,26 @@ test('Claude ACP adapter uses session/new prompt and cancel', async () => {
   assert.deepEqual(mock.calls[2]?.params, { sessionId: 'session-1', prompt: [{ type: 'text', text: 'inspect this' }] });
 });
 
+test('Claude ACP exposes persisted sessions and applies model and reasoning separately', async () => {
+  const mock = mockRpc({
+    initialize: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } },
+    'session/list': { sessions: [{ sessionId: 'old-1', title: 'Existing Claude work', cwd: 'C:/repo' }] },
+    'session/set_config_option': {},
+    'session/prompt': {},
+  });
+  const adapter = new ClaudeCodeAdapter({ rpc: mock.rpc });
+  const caps = await adapter.capabilities();
+  assert.equal(caps.model.supported, true);
+  assert.equal(caps.reasoning.supported, true);
+  assert.deepEqual((await adapter.listSessions()).map((s) => s.nativeId), ['old-1']);
+  const receipt = await adapter.send('old-1', 'read the files', { model: { providerID: 'anthropic', modelID: 'claude-sonnet' }, reasoning: 'high' });
+  assert.equal(receipt.accepted, true);
+  assert.deepEqual(mock.calls.filter((call) => call.method === 'session/set_config_option').map((call) => call.params), [
+    { sessionId: 'old-1', configId: 'model', type: 'id', value: 'claude-sonnet' },
+    { sessionId: 'old-1', configId: 'thought_level', type: 'id', value: 'high' },
+  ]);
+});
+
 test('native adapters degrade honestly when their process cannot be started', async () => {
   const adapter = new CodexAdapter({ command: 'definitely-not-a-real-codex-command' });
   const caps = await adapter.capabilities();
@@ -67,11 +87,11 @@ test('OpenCode accepts a 204 prompt response without parsing JSON', async () => 
   globalThis.fetch = async (input, init) => { requests.push({ url: String(input), init }); return new Response(null, { status: 204 }); };
   try {
     const adapter = new OpenCodeAdapter();
-    const receipt = await adapter.send('session-1', 'hello', { model: 'provider/model', variant: 'build' });
+    const receipt = await adapter.send('session-1', 'hello', { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build' });
     assert.equal(receipt.accepted, true);
     assert.equal(receipt.status, 'queued');
     const sent = JSON.parse(String(requests[0]?.init?.body));
-    assert.deepEqual(sent, { model: 'provider/model', agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
+    assert.deepEqual(sent, { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
   } finally { globalThis.fetch = previousFetch; }
 });
 

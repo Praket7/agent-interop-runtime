@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json, ThreadProgressSnapshot } from './types.js';
 import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
-import { CliPtyManager, findFreebuffCli, findLatestCliConversationId } from './pty.js';
+import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, probePty } from './pty.js';
 import { DesktopEventClient, ProgressStore } from './events.js';
 
 export interface Runtime {
@@ -39,12 +39,13 @@ function asString(value: unknown): string | undefined { return typeof value === 
 function cliProjectKey(root: string): string { return process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(root)}--${createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 12)}`; }
 function cliChatsRoots(root: string): string[] { const base = path.join(os.homedir(), '.config', 'manicode', 'projects'); return [path.join(base, cliProjectKey(root), 'chats'), path.join(base, path.basename(root), 'chats')]; }
 async function readLocalJson(file: string): Promise<any | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return undefined; } }
+async function readLocalJsonl(file: string): Promise<Json[] | undefined> { try { const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/).filter(Boolean); return lines.map((line) => JSON.parse(line) as Json); } catch { return undefined; } }
 async function cliHistory(root: string): Promise<Array<{ id: string; meta: any; messages: Json[]; state: any }>> {
   const out: Array<{ id: string; meta: any; messages: Json[]; state: any }> = [];
   for (const chats of cliChatsRoots(root)) try {
     for (const entry of await fs.readdir(chats, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
-      const dir = path.join(chats, entry.name); const meta = await readLocalJson(path.join(dir, 'chat-meta.json')); const messages = await readLocalJson(path.join(dir, 'chat-messages.json')); const state = await readLocalJson(path.join(dir, 'run-state.json'));
+      const dir = path.join(chats, entry.name); const meta = await readLocalJson(path.join(dir, 'chat-meta.json')); const messages = await readLocalJson(path.join(dir, 'chat-messages.json')) ?? await readLocalJsonl(path.join(dir, 'log.jsonl')); const state = await readLocalJson(path.join(dir, 'run-state.json'));
       if (meta && Array.isArray(messages)) out.push({ id: entry.name, meta, messages: sanitizeFreebuff(messages) as Json[], state: sanitizeFreebuff(state ?? {}) });
     }
   } catch { /* CLI history may not exist yet */ }
@@ -169,7 +170,7 @@ export class ReadOnlyRuntime extends DesktopOrchestratorRuntime {
 export class CliPtyRuntime implements Runtime {
   private manager = new CliPtyManager();
   private root = envRoot();
-  async capabilities(): Promise<Capabilities> { const cli = await findFreebuffCli(); return { product:'cli', signedIn:'unknown', orchestrator:false, readOnly:!cli, endpoints:['managed PTY'], notes:[cli ? `CLI available and selected at ${path.basename(cli)}; PTY control is enabled for bridge-owned sessions. Desktop was not selected.` : 'CLI selected but not installed or not on PATH. Live Desktop SSE is unavailable in CLI mode.'] }; }
+  async capabilities(): Promise<Capabilities> { const cli = await findFreebuffCli(); const ptyCheck = cli ? await probePty() : undefined; const notes = cli ? [`CLI available and selected at ${cli}; PTY control is enabled for bridge-owned sessions. Desktop was not selected.`, ...(ptyCheck?.ok ? ['PTY probe succeeded.'] : [`PTY probe failed on ${ptyCheck?.node ?? process.version}: ${ptyCheck?.error ?? 'unknown error'}. Run pnpm rebuild node-pty with the supported Node runtime.`])] : ['CLI selected but not installed or not executable. Set FREEBUFF_CLI_PATH to the absolute CLI path or install Freebuff. Live Desktop SSE is unavailable in CLI mode.']; return { product:'cli', signedIn:'unknown', orchestrator:false, readOnly:!cli || ptyCheck?.ok === false, endpoints:['managed PTY'], notes }; }
   async listProjects(): Promise<ProjectSummary[]> { return [{ id:this.root, path:this.root, name:path.basename(this.root) }]; }
   async listThreads(): Promise<ThreadSummary[]> { return (await cliHistory(this.root)).map((c) => ({ id:c.id, projectId:this.root, title:typeof c.meta.firstPrompt==='string'?c.meta.firstPrompt:'Managed Freebuff CLI session', state:typeof c.state?.sessionState?.mainAgentState==='object'?'completed':undefined, metadata:{messageCount:c.meta.messageCount, conversationId:c.id} })); }
   async getThread(id:string): Promise<ThreadDetail> { const safe=assertSafeId(id); const c=(await cliHistory(this.root)).find((x)=>x.id===safe); if(c) return { id:safe, projectId:this.root, title:typeof c.meta.firstPrompt==='string'?c.meta.firstPrompt:'Managed Freebuff CLI session', messages:c.messages, metadata:{messageCount:c.meta.messageCount, conversationId:safe} }; return { id:safe, projectId:this.root, title:'Managed Freebuff CLI session', metadata:redact(this.manager.snapshot(safe)) as Json }; }
