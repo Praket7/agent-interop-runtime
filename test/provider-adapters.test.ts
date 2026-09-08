@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter, type RpcRequest } from '../src/adapters.js';
+import { ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter, CursorAdapter, type RpcRequest } from '../src/adapters.js';
 
 function mockRpc(responses: Record<string, unknown>) {
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -52,15 +52,16 @@ test('Claude ACP adapter uses session/new prompt and cancel', async () => {
 
 test('Claude ACP exposes persisted sessions and applies model and reasoning separately', async () => {
   const mock = mockRpc({
-    initialize: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } },
+    initialize: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { list: {}, resume: {} } } },
     'session/list': { sessions: [{ sessionId: 'old-1', title: 'Existing Claude work', cwd: 'C:/repo' }] },
     'session/set_config_option': {},
     'session/prompt': {},
   });
   const adapter = new ClaudeCodeAdapter({ rpc: mock.rpc });
   const caps = await adapter.capabilities();
-  assert.equal(caps.model.supported, true);
-  assert.equal(caps.reasoning.supported, true);
+  assert.equal(caps.model.supported, false);
+  assert.equal(caps.model.state, 'degraded');
+  assert.equal(caps.reasoning.supported, false);
   assert.deepEqual((await adapter.listSessions()).map((s) => s.nativeId), ['old-1']);
   const receipt = await adapter.send('old-1', 'read the files', { model: { providerID: 'anthropic', modelID: 'claude-sonnet' }, reasoning: 'high' });
   assert.equal(receipt.accepted, true);
@@ -68,6 +69,22 @@ test('Claude ACP exposes persisted sessions and applies model and reasoning sepa
     { sessionId: 'old-1', configId: 'model', type: 'id', value: 'claude-sonnet' },
     { sessionId: 'old-1', configId: 'thought_level', type: 'id', value: 'high' },
   ]);
+});
+
+test('Cursor ACP authenticates through cursor_login and keeps mode separate from model', async () => {
+  const mock = mockRpc({
+    initialize: { protocolVersion: 1, authMethods: [{ methodId: 'cursor_login' }], agentCapabilities: { sessionCapabilities: { list: {} } } },
+    authenticate: {},
+    'session/new': { sessionId: 'cursor-1', cwd: 'C:/repo' },
+    'session/set_config_option': {},
+    'session/prompt': {},
+  });
+  const adapter = new CursorAdapter({ rpc: mock.rpc });
+  const session = await adapter.createSession({ cwd: 'C:/repo' });
+  assert.equal(session.id, 'cursor:cursor-1');
+  assert.equal((await adapter.send('cursor-1', 'inspect this', { model: { providerID: 'cursor', modelID: 'auto' }, agent: 'plan' })).accepted, true);
+  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'authenticate', 'session/new', 'session/set_config_option', 'session/set_config_option', 'session/prompt']);
+  assert.deepEqual(mock.calls[3]?.params, { sessionId: 'cursor-1', configId: 'mode', type: 'id', value: 'plan' });
 });
 
 test('native adapters degrade honestly when their process cannot be started', async () => {
@@ -91,7 +108,7 @@ test('OpenCode accepts a 204 prompt response without parsing JSON', async () => 
     assert.equal(receipt.accepted, true);
     assert.equal(receipt.status, 'queued');
     const sent = JSON.parse(String(requests[0]?.init?.body));
-    assert.deepEqual(sent, { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
+    assert.deepEqual(sent, { model: { providerID: 'opencode', id: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
   } finally { globalThis.fetch = previousFetch; }
 });
 

@@ -79,6 +79,30 @@ Set `FREEBUFF_MCP_CLI_MODE=pty` to force Freebuff CLI mode. This selection happe
 
 Claude Code uses the ACP executable configured by `CLAUDE_ACP_COMMAND` or `claude-code-acp`. It can create sessions, load or resume provider owned sessions, send prompts, cancel work, and apply model or thought level selections when ACP advertises the corresponding configuration options. The working directory is sent as the ACP session root so Claude can use its own file tools within the same conversation.
 
+## Cursor setup
+
+Cursor uses its Agent Client Protocol executable. Install the Cursor agent from Cursor and make sure the `agent` command is available. The runtime also checks the standard user local bin directory used by the Cursor installer on macOS and Linux. On Windows the command must be available through the user PATH.
+
+Run `pnpm dlx agent-interop-runtime@latest cursor-setup --write` to add an MCP entry to the global Cursor configuration. Run `pnpm dlx agent-interop-runtime@latest cursor-setup --project --write` to add the same entry to the current project. Add `--read-only` when the server should expose analysis tools only.
+
+The installer preserves other Cursor servers. Restart Cursor after changing the configuration. The MCP entry starts the published runtime through npx. Cursor authentication is handled by the Cursor agent. If the agent asks for login approval complete it in Cursor and run `agent-interop-runtime doctor` again.
+
+The generated server entry is equivalent to the following configuration.
+
+```json
+{
+  "mcpServers": {
+    "agentInterop": {
+      "command": "npx",
+      "args": ["-y", "agent-interop-runtime@latest", "serve"],
+      "env": { "INTEROP_READ_ONLY": "1" }
+    }
+  }
+}
+```
+
+Cursor sessions use `agent acp`. The runtime checks the ACP initialization response before calling session list, session load, or session resume. Model and mode changes are reported only after the provider accepts the corresponding session configuration request.
+
 The supported Node range is 20 through 26. If node-pty reports `posix_spawnp failed` or a ConPTY startup error, run `pnpm rebuild node-pty` with the active Node version and then run `pnpm pty:probe`. This test uses the same native PTY library and a platform shell probe, so it distinguishes runtime setup from provider authentication.
 
 `list_agent_sessions` returns both `sessions` and `providerErrors`. An unavailable provider is never represented as an empty successful result.
@@ -121,4 +145,4 @@ Local HTTP binds to loopback by default and requires a bearer token. Remote bind
 
 ## Status
 
-Freebuff and OpenCode have working local control paths. Codex and Claude Code report honest readiness until their supported native session transport is connected. Cursor is intentionally reserved for a later adapter.
+Freebuff, OpenCode, Claude Code, and Cursor have local control paths when their native transports are installed and authenticated. Codex reports honest readiness until its app server is connected.

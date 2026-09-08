@@ -1,6 +1,6 @@
 import type { Json, ProjectSummary, ThreadDetail, ThreadProgressSnapshot, ThreadSummary } from './types.js';
 
-export type ProviderId = 'freebuff' | 'opencode' | 'codex' | 'claude-code';
+export type ProviderId = 'freebuff' | 'opencode' | 'codex' | 'claude-code' | 'cursor';
 export type CapabilityState = 'available' | 'unavailable' | 'degraded' | 'unknown';
 
 export interface CapabilityRecord {
@@ -38,7 +38,9 @@ export interface AgentSession extends ThreadSummary {
 }
 
 export interface OperationReceipt { provider: ProviderId; nativeId: string; operation: string; accepted: boolean; status?: 'accepted' | 'queued' | 'completed' | 'rejected'; providerState?: string; detail?: Json; }
-export interface AgentSendOptions { model?: { providerID: string; modelID: string }; agent?: string; reasoning?: string; }
+export interface AgentModel { providerID: string; modelID: string; variant?: string; }
+export type ModelSelection = string | AgentModel;
+export interface AgentSendOptions { model?: AgentModel; agent?: string; reasoning?: string; }
 export interface AgentEvent { provider: ProviderId; nativeId: string; sequence: number; timestamp: string; type: string; data: Json; }
 
 export interface AgentAdapter {
@@ -54,7 +56,7 @@ export interface AgentAdapter {
   events?(nativeId: string): AsyncIterable<AgentEvent>;
   getDiff?(nativeId: string): Promise<Json | null>;
   respondPermission?(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt>;
-  setModel?(nativeId: string, model: string): Promise<OperationReceipt>;
+  setModel?(nativeId: string, model: ModelSelection): Promise<OperationReceipt>;
   setReasoning?(nativeId: string, effort: string): Promise<OperationReceipt>;
   dispose?(): void;
 }

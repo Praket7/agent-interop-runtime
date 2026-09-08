@@ -18,6 +18,12 @@ The adapter uses a configured ACP command, defaulting to `claude-code-acp`. It i
 
 Run `pnpm pty:probe` when Freebuff CLI startup reports `posix_spawnp failed`. The probe spawns the platform shell equivalent of `/bin/echo` through node-pty. A failure indicates a node-pty native runtime or executable permission problem, not a Freebuff login result. Rebuild node-pty with `pnpm rebuild node-pty` using the supported Node runtime and retry.
 
+## Cursor
+
+Cursor uses the same Agent Client Protocol family through the `agent acp` command. The adapter performs Cursor login when the initialization response advertises `cursor_login`. It preserves Cursor session identifiers, creates and resumes sessions when the provider advertises those methods, sends prompts, cancels work, and maps the requested agent value to Cursor mode. Model and mode controls remain provider negotiated and failures are returned instead of being simulated.
+
+The setup command writes the Cursor MCP configuration without deleting unrelated servers. Use the global path for all projects or the project path for one workspace.
+
 ## Configuration
 
 Useful environment settings include `OPENCODE_SERVER_URL`, `CODEX_APP_SERVER_COMMAND`, `CLAUDE_ACP_COMMAND`, `INTEROP_STATE_FILE`, and the existing Freebuff settings documented in the root README.

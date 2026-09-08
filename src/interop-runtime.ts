@@ -1,6 +1,6 @@
 import type { Json } from './types.js';
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, EvidenceRecord, OperationReceipt, ProviderId, WorkGraphSnapshot, AgentSendOptions } from './interop.js';
+import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, EvidenceRecord, OperationReceipt, ProviderId, WorkGraphSnapshot, AgentSendOptions, ModelSelection } from './interop.js';
 
 export class InteropRegistry {
   private adapters = new Map<ProviderId, AgentAdapter>();
@@ -17,7 +17,7 @@ export class InteropRegistry {
   async create(provider: ProviderId, options: { cwd?: string; title?: string }): Promise<AgentSession> { const fn = this.adapter(provider).createSession; if (!fn) throw new Error(`${provider} does not support session creation`); return fn.call(this.adapter(provider), options); }
   async resume(provider: ProviderId, nativeId: string): Promise<AgentSession> { const adapter = this.adapter(provider); const session = adapter.resumeSession ? await adapter.resumeSession(nativeId) : await adapter.getSession(nativeId); if (!session) throw new Error(`${provider} could not resume ${nativeId}`); return session; }
   async permission(provider: ProviderId, nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const fn = this.adapter(provider).respondPermission; if (!fn) throw new Error(`${provider} does not support permission responses`); return fn.call(this.adapter(provider), nativeId, requestId, decision); }
-  async model(provider: ProviderId, nativeId: string, model: string): Promise<OperationReceipt> { const fn = this.adapter(provider).setModel; if (!fn) throw new Error(`${provider} does not support model changes`); return fn.call(this.adapter(provider), nativeId, model); }
+  async model(provider: ProviderId, nativeId: string, model: ModelSelection): Promise<OperationReceipt> { const fn = this.adapter(provider).setModel; if (!fn) throw new Error(`${provider} does not support model changes`); return fn.call(this.adapter(provider), nativeId, model); }
   async reasoning(provider: ProviderId, nativeId: string, effort: string): Promise<OperationReceipt> { const fn = this.adapter(provider).setReasoning; if (!fn) throw new Error(`${provider} does not support reasoning changes`); return fn.call(this.adapter(provider), nativeId, effort); }
   async diff(provider: ProviderId, nativeId: string): Promise<Json | null> { const fn = this.adapter(provider).getDiff; if (!fn) throw new Error(`${provider} does not expose native diff`); const result = await fn.call(this.adapter(provider), nativeId); this.capture({ id: `${Date.now()}-${randomUUID()}`, provider, nativeId, kind: 'diff', capturedAt: new Date().toISOString(), trust: 'native', summary: 'Native diff read', data: result ?? null }); return result; }
   async readEvents(provider: ProviderId, nativeId: string, limit = 50): Promise<AgentEvent[]> { const fn = this.adapter(provider).events; if (!fn) throw new Error(`${provider} does not expose native events`); const events: AgentEvent[] = []; for await (const event of fn.call(this.adapter(provider), nativeId)) { events.push(event); if (events.length >= limit) break; } return events; }

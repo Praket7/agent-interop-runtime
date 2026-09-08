@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7
+
+Cursor Agent Client Protocol support is now available through the Cursor agent executable. The runtime can install a safe read only Cursor MCP entry globally or in the current project, authenticate when Cursor requests it, create and resume sessions, send prompts, cancel work, and pass model and mode selections when the session advertises those controls.
+
+OpenCode model requests now use the provider model identity expected by its HTTP API. OpenCode session model changes are supported and prompt acceptance remains clearly separate from completion.
+
+ACP optional methods are checked against advertised capabilities. Native process diagnostics are retained with secrets redacted so missing executables, failed authentication, and startup failures are easier to diagnose.
+
 ## 0.2.6
 
 Freebuff CLI mode now has executable checks, a real node-pty probe, explicit runtime diagnostics, and JSONL history support. Explicit CLI mode remains authoritative over Desktop discovery.
