@@ -89,7 +89,13 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
       if (url && (!freshness || Date.now() - freshness < 10 * 60_000)) candidates.push({ url, launchId, pid: Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined, freshness });
     } catch { /* readiness metadata is optional */ }
   }
-  if (process.env.FREEBUFF_ORCHESTRATOR_URL) candidates.push({ url: process.env.FREEBUFF_ORCHESTRATOR_URL, launchId: process.env.FREEBUFF_LAUNCH_ID });
+  if (process.env.FREEBUFF_ORCHESTRATOR_URL) {
+    try {
+      const configured = new URL(process.env.FREEBUFF_ORCHESTRATOR_URL);
+      const loopback = configured.hostname === '127.0.0.1' || configured.hostname === 'localhost' || configured.hostname === '::1';
+      if (loopback && (configured.protocol === 'http:' || configured.protocol === 'https:')) candidates.push({ url: configured.toString(), launchId: process.env.FREEBUFF_LAUNCH_ID });
+    } catch { /* ignore malformed or remote orchestrator URLs */ }
+  }
   const urls = new Set<string>();
   for (const log of desktopLogCandidates()) {
     try {

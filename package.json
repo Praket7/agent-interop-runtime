@@ -1,6 +1,7 @@
 {
   "name": "agent-interop-runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "A capability graded MCP runtime for live coding agent sessions.",
   "keywords": ["mcp", "agents", "interop", "codex", "opencode", "claude"],
   "repository": { "type": "git", "url": "https://github.com/Praket7/agent-interop-runtime.git" },
@@ -16,7 +17,8 @@
     "LICENSE",
     "SECURITY.md",
     "PRIVACY.md",
-    "docs"
+    "docs",
+    "server.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -24,7 +26,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx test/**/*.test.ts tests/**/*.test.ts",
     "lint": "node scripts/lint.mjs",
-    "pack:check": "pnpm build && pnpm pack --pack-destination work"
+    "mcp:validate": "node scripts/validate-mcp.mjs",
+    "pack:check": "pnpm mcp:validate && pnpm build && pnpm pack --pack-destination work"
   },
   "engines": {
     "node": ">=20"

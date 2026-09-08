@@ -27,6 +27,15 @@ node dist/src/cli.js doctor
 node dist/src/cli.js serve
 ```
 
+Everyone can run the published MCP package with pnpm without cloning the repository
+
+```text
+pnpm dlx agent-interop-runtime@latest doctor
+pnpm dlx agent-interop-runtime@latest serve
+```
+
+The package is distributed as a standard npm package and is compatible with pnpm, npm, and npx. The official MCP Registry metadata is included in `server.json`; registry publication still requires the maintainer's authenticated npm and MCP Registry release step.
+
 The original Freebuff project is not modified by this repository.
 
 ## MCP configuration
@@ -49,6 +58,8 @@ node dist/src/cli.js install --write
 Then restart the local MCP client. The installer adds an `agent_interop` entry to the user Codex configuration and leaves an optional `INTEROP_READ_ONLY` entry commented out for safe analysis sessions. Use the generated configuration output first if you want to review it without writing anything.
 
 For a storage or repository analysis, enable the read only entry with `INTEROP_READ_ONLY = '1'`. This removes mutation tools from that MCP server process rather than merely asking the model not to use them.
+
+For trusted Codex work sessions that should run repository checks, also add `INTEROP_ALLOW_VERIFICATION = '1'`. Verification remains disabled by default because it launches local commands.
 
 OpenCode can be found at its local server URL. Set `OPENCODE_SERVER_URL` when its port is different from the default.
 

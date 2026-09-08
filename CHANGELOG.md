@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Add npm and official MCP Registry metadata for universal pnpm and npx installation.
+- Add package metadata validation to the release checks.
+- Disable MCP verification commands by default unless explicitly authorized.
+- Restrict configured Freebuff discovery URLs to loopback addresses.
+- Protect durable workflow state with owner-only permissions on Unix-like systems.
+
 ## 0.1.5
 
 - Add normalized, redacted, bounded live Desktop progress via `/api/events`.
