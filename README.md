@@ -55,7 +55,13 @@ To install the local registration automatically, run
 node dist/src/cli.js install --write
 ```
 
-Then restart the local MCP client. The installer adds an `agent_interop` entry to the user Codex configuration and leaves an optional `INTEROP_READ_ONLY` entry commented out for safe analysis sessions. Use the generated configuration output first if you want to review it without writing anything.
+Then restart the local MCP client. The installer adds an `agent_interop` entry to the user Codex configuration using the published package, so it does not depend on a temporary npx cache path. `setup` is an alias for `install`. Use the generated configuration output first if you want to review it without writing anything.
+
+```text
+npx agent-interop-runtime@latest setup --write
+```
+
+The package deliberately does not modify `config.toml` from an npm `postinstall` hook. Configuration changes happen only after this explicit command, which keeps package installation reviewable and safe.
 
 For a storage or repository analysis, enable the read only entry with `INTEROP_READ_ONLY = '1'`. This removes mutation tools from that MCP server process rather than merely asking the model not to use them.
 

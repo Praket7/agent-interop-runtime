@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- Add an explicit setup alias that registers the published package in Codex config.
+- Avoid writing ephemeral local package cache paths into MCP configuration.
+
 ## 0.2.1
 
 - Prepare the first public npm and MCP Registry release.
