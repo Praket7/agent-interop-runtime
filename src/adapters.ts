@@ -14,6 +14,25 @@ const json = (v: unknown): Json => JSON.parse(JSON.stringify(v ?? null)) as Json
 const cap = (supported: boolean, transport: string, protocol: string, reason?: string) => ({ supported, state: supported ? 'available' as const : 'unavailable' as const, transport, protocol, reason });
 class OpenCodeHttpError extends Error { constructor(readonly status: number, readonly providerDetail: string) { super(`OpenCode HTTP ${status}: ${providerDetail}`); } }
 
+/** Normalized loopback check shared by request and event paths (AI-07). */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '::' || host === '[::1]') return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return false;
+}
+
+/** One authentication/header policy for normal requests and SSE (AI-07). */
+export function opencodeAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const username = process.env.OPENCODE_SERVER_USERNAME;
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  const effectiveUser = username ?? (password ? 'opencode' : undefined);
+  if (effectiveUser && password) headers.authorization = `Basic ${Buffer.from(`${effectiveUser}:${password}`).toString('base64')}`;
+  return headers;
+}
+
 export class OpenCodeAdapter implements AgentAdapter {
   readonly id: ProviderId = 'opencode';
   private base: URL;
@@ -21,8 +40,8 @@ export class OpenCodeAdapter implements AgentAdapter {
   private lastError?: string;
   private readonly eventSequences = new Map<string, number>();
   constructor(base = process.env.OPENCODE_SERVER_URL ?? 'http://127.0.0.1:4096') { this.base = new URL(base); }
-  private get remoteWithoutAuth(): boolean { return !['127.0.0.1', 'localhost', '::1'].includes(this.base.hostname) && !(process.env.OPENCODE_SERVER_USERNAME && process.env.OPENCODE_SERVER_PASSWORD); }
-  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD'); const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json' }; const username = process.env.OPENCODE_SERVER_USERNAME ?? (process.env.OPENCODE_SERVER_PASSWORD ? 'opencode' : undefined); const password = process.env.OPENCODE_SERVER_PASSWORD; if (username && password) headers.authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }
+  private get remoteWithoutAuth(): boolean { return !isLoopbackHost(this.base.hostname) && !opencodeAuthHeaders().authorization; }
+  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD (a password alone uses the documented default username)'); const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }
   private modelBody(selection: NonNullable<AgentSendOptions['model']>, field: 'modelID' | 'id') { return { providerID: selection.providerID, [field]: selection.modelID }; }
   private async requestWithModelFallback<T>(method: string, route: string, selection: NonNullable<AgentSendOptions['model']>, body: (model: Record<string, unknown>) => unknown): Promise<T> { try { return await this.request<T>(method, route, body(this.modelBody(selection, 'modelID'))); } catch (error) { if (!(error instanceof OpenCodeHttpError) || error.status !== 400 || !/(modelID|model id|unknown field|invalid model|expected id)/i.test(error.providerDetail)) throw error; return this.request<T>(method, route, body(this.modelBody(selection, 'id'))); } }
   async capabilities(): Promise<AgentCapabilities> { this.lastError = undefined; try { await this.request('GET', '/global/health'); this.available = true; } catch (first) { try { const sessions = await this.request<unknown>('GET', '/session'); if (!Array.isArray(sessions)) throw new Error('OpenCode /session returned malformed response'); this.available = true; } catch (error) { this.available = false; this.lastError = error instanceof Error ? error.message : String(error); } } const reason = this.available ? undefined : this.lastError ?? 'Start opencode serve --hostname 127.0.0.1 --port 4096 or set OPENCODE_SERVER_URL'; return { provider: this.id, adapterVersion: VERSION, authorization: this.available ? 'authorized' : 'unknown', discovery: cap(this.available, 'http', 'OpenCode server API', reason), sessions: cap(this.available, 'http', 'OpenCode session API', reason), sendMessage: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), steer: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), cancel: cap(this.available, 'http', 'POST /session/:id/abort', reason), events: cap(this.available, 'http', 'GET /event with reconnect', reason), diff: cap(this.available, 'http', 'GET /session/:id/diff', reason), permissions: cap(this.available, 'http', 'POST /session/:id/permissions/:permissionID', reason), model: cap(false, 'OpenCode prompt request', 'OpenCode server API', this.available ? 'Native session model mutation is not exposed by the validated API. Pass model on agent_send.' : reason), reasoning: cap(this.available, 'OpenCode prompt request', 'OpenCode model variant', this.available ? 'Mapped to the selected OpenCode model variant on the next prompt.' : reason), limitations: ['Existing session attachment requires a reachable OpenCode server', 'Accepted means the OpenCode HTTP endpoint accepted the prompt; it does not mean the agent completed it', 'Model selection is an explicit next prompt override, not persistent session mutation'] }; }
@@ -36,7 +55,56 @@ export class OpenCodeAdapter implements AgentAdapter {
   async getDiff(nativeId: string): Promise<Json | null> { return json(await this.request('GET', `/session/${encodeURIComponent(nativeId)}/diff`)); }
   async respondPermission(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const result = await this.request('POST', `/session/${encodeURIComponent(nativeId)}/permissions/${encodeURIComponent(requestId)}`, { response: decision }); return { provider: this.id, nativeId, operation: 'permission', accepted: true, detail: json(result) }; }
   async setModel(_nativeId: string, _selection: ModelSelection): Promise<OperationReceipt> { throw new Error('OpenCode does not expose a validated native session model mutation; provide model in the next agent_send request'); }
-  async *events(nativeId: string): AsyncIterable<AgentEvent> { let failures = 0; while (true) { try { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires credentials'); const headers: Record<string, string> = { accept: 'text/event-stream' }; const username = process.env.OPENCODE_SERVER_USERNAME; const password = process.env.OPENCODE_SERVER_PASSWORD; if (username && password) headers.authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`; const response = await fetch(new URL('/event', this.base), { headers, signal: AbortSignal.timeout(30_000) }); if (!response.ok || !response.body) throw new Error(`OpenCode event stream HTTP ${response.status}`); failures = 0; const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; try { while (true) { const chunk = await reader.read(); if (chunk.done) break; buffer += decoder.decode(chunk.value, { stream: true }); const records = buffer.split(/\r?\n\r?\n/); buffer = records.pop() ?? ''; for (const recordValue of records) { const data = recordValue.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join(''); if (!data) continue; try { const parsed = JSON.parse(data) as unknown; const raw = record(parsed); const sessionId = text(raw.sessionID) ?? text(record(raw.properties).sessionID) ?? text(record(raw.info).sessionID); if (sessionId && sessionId !== nativeId) continue; const sequence = (this.eventSequences.get(nativeId) ?? 0) + 1; this.eventSequences.set(nativeId, sequence); yield { provider: this.id, nativeId, sequence, timestamp: now(), type: text(raw.type) ?? 'opencode.event', data: json(parsed) }; } catch { continue; } } } } finally { await reader.cancel(); } } catch (error) { if (++failures >= 3) throw error; await new Promise((resolve) => setTimeout(resolve, failures * 250)); } } }
+  async *events(nativeId: string): AsyncIterable<AgentEvent> {
+    let failures = 0;
+    while (true) {
+      try {
+        if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires credentials');
+        // AI-07: same auth policy as normal requests, including the password-only default user.
+        const headers: Record<string, string> = { accept: 'text/event-stream', ...opencodeAuthHeaders() };
+        const response = await fetch(new URL('/event', this.base), { headers, signal: AbortSignal.timeout(30_000) });
+        if (!response.ok || !response.body) throw new Error(`OpenCode event stream HTTP ${response.status}`);
+        failures = 0;
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
+        try {
+          while (true) {
+            const chunk = await reader.read(); if (chunk.done) break;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            const records = buffer.split(/\r?\n\r?\n/); buffer = records.pop() ?? '';
+            for (const recordValue of records) {
+              const data = recordValue.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('');
+              if (!data) continue;
+              try {
+                const parsed = JSON.parse(data) as unknown;
+                const sessionId = this.attributedSession(parsed);
+                // AI-06: events without a recognized session location are never stamped onto
+                // the requested session; they are skipped as unattributable/global.
+                if (!sessionId || sessionId !== nativeId) continue;
+                const sequence = (this.eventSequences.get(nativeId) ?? 0) + 1;
+                this.eventSequences.set(nativeId, sequence);
+                yield { provider: this.id, nativeId, sequence, timestamp: now(), type: text(record(parsed).type) ?? 'opencode.event', data: json(parsed) };
+              } catch { continue; }
+            }
+          }
+        } finally { await reader.cancel(); }
+      } catch (error) { if (++failures >= 3) throw error; await new Promise((resolve) => setTimeout(resolve, failures * 250)); }
+    }
+  }
+
+  /**
+   * AI-06: exact session attribution across supported OpenCode payload shapes, including
+   * nested `properties.info.sessionID` and `properties.part.sessionID` from the generated
+   * SDK types. Unknown shapes return undefined instead of being claimed by the caller.
+   */
+  private attributedSession(payload: unknown): string | undefined {
+    const root = record(payload);
+    const properties = record(root.properties);
+    return text(root.sessionID)
+      ?? text(properties.sessionID)
+      ?? text(record(root.info).sessionID)
+      ?? text(record(properties.info).sessionID)
+      ?? text(record(properties.part).sessionID);
+  }
 }
 
 type RpcMessage = { id?: number | string; method?: string; params?: unknown; result?: unknown; error?: { code?: number; message?: string; data?: unknown } };
@@ -61,7 +129,19 @@ class JsonRpcProcess {
     this.child.once('error', fail);
     this.child.once('exit', (code, signal) => fail(new Error(`native protocol exited (${code ?? signal ?? 'unknown'})`)));
   }
-  private receive(message: RpcMessage) { if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) { const waiter = this.pending.get(message.id); if (!waiter) return; this.pending.delete(message.id); if (message.error) waiter.reject(new Error(message.error.message ?? `JSON RPC error ${message.error.code ?? 'unknown'}`)); else waiter.resolve(message.result); return; } if (message.method && message.id !== undefined) { void this.respond(message); return; } if (message.method) { const params = record(message.params); const sessionId = text(params.sessionId) ?? text(params.session_id) ?? text(params.threadId) ?? text(params.thread_id) ?? text(record(params.session).id); const waiterIndex = sessionId ? this.notificationWaiters.findIndex((waiter) => waiter.sessionId === sessionId) : -1; if (waiterIndex >= 0) { const waiter = this.notificationWaiters.splice(waiterIndex, 1)[0]!; clearTimeout(waiter.timer); waiter.resolve(message); return; } if (sessionId) { const queue = this.notifications.get(sessionId) ?? []; queue.push(message); if (queue.length > 500) queue.shift(); this.notifications.set(sessionId, queue); } else { this.globalNotifications.push(message); if (this.globalNotifications.length > 500) this.globalNotifications.shift(); } } }
+  private receive(message: RpcMessage) {
+    if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) { const waiter = this.pending.get(message.id); if (!waiter) return; this.pending.delete(message.id); if (message.error) waiter.reject(new Error(message.error.message ?? `JSON RPC error ${message.error.code ?? 'unknown'}`)); else waiter.resolve(message.result); return; }
+    if (message.method && message.id !== undefined) { void this.respond(message); return; }
+    if (message.method) {
+      const params = record(message.params);
+      const sessionId = text(params.sessionId) ?? text(params.session_id) ?? text(params.threadId) ?? text(params.thread_id) ?? text(record(params.session).id);
+      if (sessionId) {
+        const waiterIndex = this.notificationWaiters.findIndex((waiter) => waiter.sessionId === sessionId);
+        if (waiterIndex >= 0) { const waiter = this.notificationWaiters.splice(waiterIndex, 1)[0]!; clearTimeout(waiter.timer); waiter.resolve(message); return; }
+        const queue = this.notifications.get(sessionId) ?? []; queue.push(message); if (queue.length > 500) queue.shift(); this.notifications.set(sessionId, queue);
+      } else { this.globalNotifications.push(message); if (this.globalNotifications.length > 500) this.globalNotifications.shift(); }
+    }
+  }
   private async respond(message: RpcMessage): Promise<void> { const write = (payload: unknown) => this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, ...payload as object })}\n`); try { const result = this.serverRequest ? await this.serverRequest(message) : undefined; write({ result }); } catch (error) { write({ error: { code: -32000, message: error instanceof Error ? error.message : String(error) } }); } }
   async nextNotification(sessionId: string, timeoutMs = 30_000): Promise<RpcMessage | undefined> { const queue = this.notifications.get(sessionId); const existing = queue?.shift(); if (existing) return existing; if (this.closed) return undefined; return new Promise((resolve) => { const timer = setTimeout(() => { const index = this.notificationWaiters.findIndex((waiter) => waiter.resolve === resolve); if (index >= 0) this.notificationWaiters.splice(index, 1); resolve(undefined); }, timeoutMs); this.notificationWaiters.push({ sessionId, resolve, timer }); }); }
   get isClosed(): boolean { return this.closed; }
@@ -88,7 +168,8 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   private connecting?: Promise<boolean>;
   private ownsProcess = false;
   private readonly sessions = new Map<string, AgentSession>();
-  private pendingPermissions = new Map<string, { nativeId: string; resolve: (value: unknown) => void }>();
+  /** Pending provider permission requests surfaced through permission_pending (section 4 gap). */
+  protected pendingPermissions = new Map<string, { nativeId: string; sessionId: string; method: string; options: Json; requestedAt: string; resolve: (value: unknown) => void }>();
   constructor(options: NativeAdapterOptions = {}) { this.options = options; this.rpc = options.rpc; }
   protected abstract initialize(): Promise<unknown>;
   protected abstract discover(): Promise<unknown[]>;
@@ -98,7 +179,34 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   protected abstract interrupt(nativeId: string): Promise<unknown>;
   protected abstract sessionFrom(value: unknown, source: string): AgentSession | null;
   protected async connected(): Promise<boolean> { return this.connect(); }
-  protected async handleServerRequest(message: RpcMessage): Promise<unknown> { const params = record(message.params); const sessionId = text(params.sessionId) ?? text(params.threadId) ?? 'unknown'; if (message.method && /request_permission|approval/i.test(message.method)) return await new Promise((resolve) => { this.pendingPermissions.set(`${sessionId}:${String(message.id)}`, { nativeId: sessionId, resolve }); }); if (message.method !== 'fs/read_text_file') throw new Error(`Unsupported provider request ${message.method ?? 'unknown'}`); const requested = text(params.path); if (!requested) throw new Error('ACP file request did not include a path'); const root = (this.sessions.get(sessionId)?.cwd) ?? this.options.cwd ?? process.cwd(); const file = await safeProjectPath(root, requested); const stat = await fs.stat(file); if (stat.size > 1_000_000) throw new Error('ACP file read exceeds the 1 MB safety limit'); const content = await fs.readFile(file, 'utf8'); const line = typeof params.line === 'number' ? Math.max(1, Math.floor(params.line)) : 1; const limit = typeof params.limit === 'number' ? Math.min(10_000, Math.max(1, Math.floor(params.limit))) : undefined; const lines = content.split(/\r?\n/); return { content: lines.slice(line - 1, limit ? line - 1 + limit : undefined).join('\n') }; }
+  listPendingPermissions(): Array<{ requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> {
+    return [...this.pendingPermissions.entries()].map(([requestId, pending]) => ({ requestId, nativeId: pending.nativeId, method: pending.method, options: pending.options, requestedAt: pending.requestedAt }));
+  }
+  protected async handleServerRequest(message: RpcMessage): Promise<unknown> {
+    const params = record(message.params);
+    const sessionId = text(params.sessionId) ?? text(params.threadId) ?? 'unknown';
+    if (message.method && /request_permission|approval/i.test(message.method)) {
+      // Explicit human authorization only: the request stays pending until permission_respond.
+      return await new Promise((resolve) => {
+        const key = `${sessionId}:${String(message.id)}`;
+        this.pendingPermissions.set(key, { nativeId: sessionId, sessionId, method: message.method!, options: json(params), requestedAt: now(), resolve });
+      });
+    }
+    if (message.method !== 'fs/read_text_file') throw new Error(`Unsupported provider request ${message.method ?? 'unknown'}`);
+    const requested = text(params.path);
+    if (!requested) throw new Error('ACP file request did not include a path');
+    // AI-13: file reads use the session's locally recorded cwd; no silent process.cwd() guess.
+    const root = this.sessions.get(sessionId)?.cwd ?? this.options.cwd;
+    if (!root) throw new Error(`No verified workspace is recorded for session ${sessionId}; refusing to guess a cwd for file access`);
+    const file = await safeProjectPath(root, requested);
+    const stat = await fs.stat(file);
+    if (stat.size > 1_000_000) throw new Error('ACP file read exceeds the 1 MB safety limit');
+    const content = await fs.readFile(file, 'utf8');
+    const line = typeof params.line === 'number' ? Math.max(1, Math.floor(params.line)) : 1;
+    const limit = typeof params.limit === 'number' ? Math.min(10_000, Math.max(1, Math.floor(params.limit))) : undefined;
+    const lines = content.split(/\r?\n/);
+    return { content: lines.slice(line - 1, limit ? line - 1 + limit : undefined).join('\n') };
+  }
   private async connect(): Promise<boolean> {
     if (this.initialized && (!this.ownsProcess || !this.process?.isClosed)) return true;
     if (this.connecting) return this.connecting;
@@ -134,15 +242,35 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   protected notify(method: string, params?: unknown): void { this.process?.notify(method, params); }
   async capabilities(): Promise<AgentCapabilities> { const ready = await this.connect(); const reason = ready ? undefined : this.failure ?? `${this.label} native transport is unavailable`; return { provider: this.id, adapterVersion: VERSION, authorization: ready ? 'unknown' : 'unauthorized', discovery: cap(ready, 'JSON RPC over stdio', this.protocol, reason), sessions: cap(ready, 'JSON RPC over stdio', this.protocol, reason), sendMessage: cap(ready, 'JSON RPC over stdio', this.protocol, reason), steer: cap(false, 'JSON RPC over stdio', this.protocol, 'Provider protocol has no distinct steer operation'), cancel: cap(ready, 'JSON RPC over stdio', this.protocol, reason), events: cap(ready, 'JSON RPC notifications', this.protocol, ready ? 'Events are live and not replayable after process restart' : reason), diff: cap(false, 'provider native protocol', this.protocol, 'Provider does not expose a stable native diff method'), permissions: cap(ready, 'JSON RPC server requests', this.protocol, ready ? 'Permission requests remain pending until permission_respond is called' : reason), model: cap(false, 'provider native protocol', this.protocol, 'Model selection is not standardized by this transport'), reasoning: cap(false, 'provider native protocol', this.protocol, 'Reasoning selection is not standardized by this transport'), limitations: ['Only documented JSON RPC methods are used', ...(ready ? [] : ['Native control is unavailable until the provider process starts and initializes successfully'])] }; }
   protected session(nativeId: string): AgentSession | undefined { return this.sessions.get(nativeId); }
+  protected rememberSession(session: AgentSession): void { this.sessions.set(session.nativeId, session); }
   async listSessions(): Promise<AgentSession[]> { if (!await this.connect()) throw new Error(this.failure ?? `${this.label} native transport is unavailable`); const result = await this.discover(); const sessions = result.map((v) => this.sessionFrom(v, `${this.protocol} session discovery`)).filter((v): v is AgentSession => Boolean(v)); for (const value of sessions) this.sessions.set(value.nativeId, value); return sessions; }
   async getSession(nativeId: string): Promise<AgentSession | null> { return this.sessions.get(nativeId) ?? null; }
-  async createSession(options: { cwd?: string; title?: string }): Promise<AgentSession> { if (!await this.connect()) throw new Error(this.failure ?? `${this.label} native transport is unavailable`); const session = this.sessionFrom(await this.startSession(options), `${this.protocol} session/new`); if (!session) throw new Error(`${this.label} returned an invalid session`); this.sessions.set(session.nativeId, session); return session; }
-  async resumeSession(nativeId: string): Promise<AgentSession> { if (!await this.connect()) throw new Error(this.failure ?? `${this.label} native transport is unavailable`); const session = this.sessionFrom(await this.resume(nativeId), `${this.protocol} session resume`); if (!session) throw new Error(`${this.label} returned an invalid session`); this.sessions.set(session.nativeId, session); return session; }
+  async createSession(options: { cwd?: string; title?: string }): Promise<AgentSession> {
+    if (!await this.connect()) throw new Error(this.failure ?? `${this.label} native transport is unavailable`);
+    const session = this.sessionFrom(await this.startSession(options), `${this.protocol} session/new`);
+    if (!session) throw new Error(`${this.label} returned an invalid session`);
+    // AI-13: preserve the locally requested and validated cwd even when the provider response
+    // omits it. Minimal responses must not lose the workspace.
+    const requestedCwd = options.cwd ? path.resolve(options.cwd) : undefined;
+    const merged: AgentSession = { ...session, cwd: session.cwd ?? requestedCwd, provenance: { ...session.provenance, ...(requestedCwd && !session.cwd ? { source: `${session.provenance.source} (cwd from local request)` } : {}) } };
+    this.sessions.set(merged.nativeId, merged);
+    return merged;
+  }
+  async resumeSession(nativeId: string): Promise<AgentSession> {
+    if (!await this.connect()) throw new Error(this.failure ?? `${this.label} native transport is unavailable`);
+    const session = this.sessionFrom(await this.resume(nativeId), `${this.protocol} session resume`);
+    if (!session) throw new Error(`${this.label} returned an invalid session`);
+    const existing = this.sessions.get(nativeId);
+    // AI-13: the previously recorded requested cwd wins over a fresh minimal response.
+    const merged: AgentSession = { ...session, cwd: existing?.cwd ?? session.cwd };
+    this.sessions.set(merged.nativeId, merged);
+    return merged;
+  }
   async send(nativeId: string, value: string, options?: AgentSendOptions): Promise<OperationReceipt> { if (!await this.connect()) return { provider: this.id, nativeId, operation: 'send', accepted: false, detail: json({ reason: this.failure }) }; await this.prompt(nativeId, value, options); return { provider: this.id, nativeId, operation: 'send', accepted: true }; }
-  async cancel(nativeId: string): Promise<OperationReceipt> { if (!await this.connect()) return { provider: this.id, nativeId, operation: 'cancel', accepted: false, detail: json({ reason: this.failure }) }; await this.interrupt(nativeId); return { provider: this.id, nativeId, operation: 'cancel', accepted: true }; }
+  async cancel(nativeId: string): Promise<OperationReceipt> { if (!await this.connect()) return { provider: this.id, nativeId, operation: 'cancel', accepted: false, detail: json({ reason: this.failure }) }; await this.interrupt(nativeId); return { provider: this.id, nativeId, operation: 'cancel', accepted: true, status: 'completed', providerState: 'cancel_notification_sent' }; }
   async respondPermission(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const pending = this.pendingPermissions.get(`${nativeId}:${requestId}`); if (!pending) throw new Error(`No pending permission request ${requestId} for ${nativeId}`); this.pendingPermissions.delete(`${nativeId}:${requestId}`); pending.resolve({ outcome: { outcome: decision === 'deny' || decision === 'cancelled' ? decision : 'selected', ...(decision === 'deny' || decision === 'cancelled' ? {} : { optionId: decision }) } }); return { provider: this.id, nativeId, operation: 'permission', accepted: true, status: 'completed', providerState: 'decision_sent' }; }
   async *events(nativeId: string): AsyncIterable<AgentEvent> { if (!await this.connect()) return; let sequence = 0; while (this.process) { const message = await this.process.nextNotification(nativeId); if (!message) return; const raw = record(message.params); yield { provider: this.id, nativeId, sequence: ++sequence, timestamp: now(), type: message.method ?? 'notification', data: json(raw) }; } }
-  dispose() { this.process?.close(); this.process = undefined; this.rpc = undefined; this.ownsProcess = false; this.initialized = false; this.failure = undefined; this.connecting = undefined; }
+  dispose() { this.process?.close(); this.process = undefined; this.rpc = undefined; this.ownsProcess = false; this.initialized = false; this.failure = undefined; this.connecting = undefined; for (const pending of this.pendingPermissions.values()) pending.resolve(undefined); this.pendingPermissions.clear(); }
 }
 
 export class CodexAdapter extends NativeProtocolAdapter {
@@ -169,10 +297,26 @@ export class ClaudeCodeAdapter extends NativeProtocolAdapter {
   private sessionCapability(name: string): boolean { return Boolean(record(record(record(this.initializeResult).agentCapabilities).sessionCapabilities)[name]); }
   protected async discover() { if (!this.sessionCapability('list')) return []; const result = record(await this.call('session/list', {})); const sessions = result.sessions ?? result.data ?? result; if (!Array.isArray(sessions)) throw new Error('ACP session/list returned a malformed response'); return sessions; }
   protected async startSession(options: { cwd?: string; title?: string }) { const result = await this.call('session/new', { cwd: path.resolve(options.cwd ?? process.cwd()), mcpServers: [], ...(options.title ? { title: options.title } : {}) }); this.cacheSessionOptions(result); return result; }
-  protected async resume(nativeId: string) { if (!this.agentCapability('loadSession') && !this.sessionCapability('resume')) throw new Error('ACP does not advertise session loading or resume support'); const cwd = path.resolve(this.session(nativeId)?.cwd ?? this.optionsCwd()); const method = this.agentCapability('loadSession') ? 'session/load' : 'session/resume'; const result = await this.call(method, { sessionId: nativeId, cwd, mcpServers: [] }); const response = record(result); if (!text(response.sessionId) && !text(response.id)) (response as Record<string, unknown>).sessionId = nativeId; this.cacheSessionOptions(response); return response; }
-  private optionsCwd(): string { return process.cwd(); }
+  protected async resume(nativeId: string) {
+    if (!this.agentCapability('loadSession') && !this.sessionCapability('resume')) throw new Error('ACP does not advertise session loading or resume support');
+    // AI-13: resume uses the locally recorded requested cwd; when unknown, fail explicitly
+    // instead of guessing the server process directory.
+    const recorded = this.session(nativeId)?.cwd;
+    const cwd = recorded ? path.resolve(recorded) : undefined;
+    const method = this.agentCapability('loadSession') ? 'session/load' : 'session/resume';
+    const result = await this.call(method, { sessionId: nativeId, ...(cwd ? { cwd } : {}), mcpServers: [] });
+    const response = record(result);
+    if (!text(response.sessionId) && !text(response.id)) (response as Record<string, unknown>).sessionId = nativeId;
+    this.cacheSessionOptions(response);
+    return response;
+  }
   protected prompt(nativeId: string, value: string) { return this.call('session/prompt', { sessionId: nativeId, prompt: [{ type: 'text', text: value }] }, 600_000); }
-  protected interrupt(nativeId: string) { return this.call('session/cancel', { sessionId: nativeId }); }
+  /**
+   * AI-12: under the negotiated ACP v1 contract, session/cancel is a notification. It must not
+   * be sent as a request; the original prompt's own completion/cancellation result is observed
+   * separately through session notifications.
+   */
+  protected interrupt(nativeId: string) { this.notify('session/cancel', { sessionId: nativeId }); return Promise.resolve({ notified: true }); }
   async send(nativeId: string, value: string, options?: AgentSendOptions): Promise<OperationReceipt> { if (options?.model) await this.setModel(nativeId, options.model); if (options?.reasoning) await this.setReasoning(nativeId, options.reasoning); if (options?.agent) await this.setConfig(nativeId, 'agent', options.agent); return super.send(nativeId, value); }
   private cacheSessionOptions(value: unknown): void { const s = record(record(value).session ?? value); const id = text(s.sessionId) ?? text(s.id); const options = Array.isArray(s.configOptions) ? s.configOptions : []; if (id) this.sessionOptions.set(id, new Set(options.map((option) => text(record(option).id) ?? text(record(option).configId)).filter((v): v is string => Boolean(v)))); }
   private async setConfig(nativeId: string, configId: string, value: string): Promise<void> { const options = this.sessionOptions.get(nativeId); if (options && options.size && !options.has(configId)) throw new Error(`ACP session does not advertise configuration option ${configId}`); await this.call('session/set_config_option', { sessionId: nativeId, configId, type: 'id', value }); }

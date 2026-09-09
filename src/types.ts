@@ -27,4 +27,4 @@ export interface ThreadProgressEvent {
   error?: string;
   raw?: Json;
 }
-export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; nextSequence?: number; latestSequence?: number; gap?: { from: number; to: number }; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; phase?: ThreadProgressEvent['phase']; lastMeaningfulUpdate?: string; lastError?: string; secondsSinceLastEvent?: number; }
+export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; /** Last delivered event sequence; pass back as afterSequence for exactly-once reads (AI-04). */ next?: number; nextSequence?: number; latestSequence?: number; gap?: { from: number; to: number }; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; phase?: ThreadProgressEvent['phase']; lastMeaningfulUpdate?: string; lastError?: string; secondsSinceLastEvent?: number; }

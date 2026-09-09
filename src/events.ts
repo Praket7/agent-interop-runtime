@@ -42,12 +42,43 @@ export function normalizeProgressEvent(value: unknown, eventName?: string): Omit
 
 type Entry = { event: ThreadProgressEvent; bytes: number };
 export class ProgressStore {
-  private byThread = new Map<string, Entry[]>(); private waiters = new Map<string, Set<() => void>>(); private seq = new Map<string, number>(); private connected = false; private lastConnectionAt = 0;
-  setConnected(value: boolean): void { this.connected = value; if (value) this.lastConnectionAt = Date.now(); }
-  append(value: Omit<ThreadProgressEvent, 'sequence'>): void { const now = Date.now(); const current = (this.byThread.get(value.threadId) ?? []).filter(x => now - Date.parse(x.event.timestamp) <= TTL_MS); const next = (this.seq.get(value.threadId) ?? 0) + 1; const event = { ...value, sequence: next }; current.push({ event, bytes: JSON.stringify(event).length }); let size = current.reduce((n, x) => n + x.bytes, 0); while (current.length > MAX_EVENTS || size > MAX_BYTES) { const removed = current.shift(); size -= removed?.bytes ?? 0; } this.seq.set(value.threadId, next); this.byThread.set(value.threadId, current); for (const wake of this.waiters.get(value.threadId) ?? []) wake(); }
-  read(threadId: string, afterSequence = 0, limit = 50): ThreadProgressSnapshot { const now = Date.now(); const entries = (this.byThread.get(threadId) ?? []).filter(x => now - Date.parse(x.event.timestamp) <= TTL_MS); this.byThread.set(threadId, entries); const all = entries.map(x => x.event); const latest = all.at(-1); const firstAvailable = all[0]?.sequence; const events = all.filter(x => x.sequence > afterSequence).slice(0, Math.max(1, Math.min(limit, 100))); const meaningful = [...all].reverse().find(x => x.kind !== 'unknown' || x.phase); const currentState = [...all].reverse().find(x => x.state)?.state; const activeTool = [...all].reverse().find(x => x.tool && (x.kind === 'tool_start' || x.kind === 'tool_output'))?.tool; const filesChanged = [...new Set(all.flatMap(x => x.files ?? []))].slice(-100); const lastError = [...all].reverse().find(x => x.error)?.error; return { threadId, currentState, events, nextSequence: (events.at(-1)?.sequence ?? afterSequence) + 1, latestSequence: latest?.sequence, ...(firstAvailable !== undefined && afterSequence + 1 < firstAvailable ? { gap: { from: afterSequence + 1, to: firstAvailable - 1 } } : {}), connected: this.connected, stale: !this.connected || (this.lastConnectionAt > 0 && Date.now() - this.lastConnectionAt > STALE_MS), latestEventAt: latest?.timestamp, activeTool, filesChanged, phase: meaningful?.phase, lastMeaningfulUpdate: meaningful?.timestamp, lastError, secondsSinceLastEvent: latest ? Math.max(0, Math.floor((now - Date.parse(latest.timestamp)) / 1000)) : undefined }; }
+  private byThread = new Map<string, Entry[]>(); private waiters = new Map<string, Set<() => void>>(); private seq = new Map<string, number>(); private connected = false; private lastConnectionAt = 0; private lastActivityAt = 0;
+  setConnected(value: boolean): void {
+    this.connected = value;
+    // Connection establishment alone does not prove health (AI-05); only a fresh event or a
+    // confirmed live transport counts as activity. Heartbeats call noteActivity().
+    if (value) { this.lastConnectionAt = Date.now(); this.lastActivityAt = Date.now(); }
+  }
+  /** A heartbeat/keep-alive or any transport activity refreshes stream health. */
+  noteActivity(): void { if (this.connected) this.lastActivityAt = Date.now(); }
+  append(value: Omit<ThreadProgressEvent, 'sequence'>): void {
+    const now = Date.now();
+    const current = (this.byThread.get(value.threadId) ?? []).filter(x => now - Date.parse(x.event.timestamp) <= TTL_MS);
+    const next = (this.seq.get(value.threadId) ?? 0) + 1; const event = { ...value, sequence: next }; current.push({ event, bytes: JSON.stringify(event).length }); let size = current.reduce((n, x) => n + x.bytes, 0); while (current.length > MAX_EVENTS || size > MAX_BYTES) { const removed = current.shift(); size -= removed?.bytes ?? 0; } this.seq.set(value.threadId, next); this.byThread.set(value.threadId, current); for (const wake of this.waiters.get(value.threadId) ?? []) wake();
+  }
+  read(threadId: string, afterSequence = 0, limit = 50): ThreadProgressSnapshot {
+    const now = Date.now();
+    const entries = (this.byThread.get(threadId) ?? []).filter(x => now - Date.parse(x.event.timestamp) <= TTL_MS); this.byThread.set(threadId, entries); const all = entries.map(x => x.event); const latest = all.at(-1); const firstAvailable = all[0]?.sequence; const events = all.filter(x => x.sequence > afterSequence).slice(0, Math.max(1, Math.min(limit, 100)));
+    const meaningful = [...all].reverse().find(x => x.kind !== 'unknown' || x.phase); const currentState = [...all].reverse().find(x => x.state)?.state; const activeTool = [...all].reverse().find(x => x.tool && (x.kind === 'tool_start' || x.kind === 'tool_output'))?.tool; const filesChanged = [...new Set(all.flatMap(x => x.files ?? []))].slice(-100); const lastError = [...all].reverse().find(x => x.error)?.error;
+    // AI-04: `next` is the last delivered sequence; passing it back as afterSequence yields the
+    // next event exactly once, including across empty pages. Old consumers using +1 semantics
+    // at worst re-read nothing because sequences only move forward (no duplication of gaps).
+    const next = events.at(-1)?.sequence ?? afterSequence;
+    const streamActive = this.connected && (now - this.lastActivityAt <= STALE_MS);
+    return { threadId, currentState, events, next, nextSequence: next, latestSequence: latest?.sequence, ...(firstAvailable !== undefined && afterSequence + 1 < firstAvailable ? { gap: { from: afterSequence + 1, to: firstAvailable - 1 } } : {}), connected: this.connected, stale: !streamActive, latestEventAt: latest?.timestamp, activeTool, filesChanged, phase: meaningful?.phase, lastMeaningfulUpdate: meaningful?.timestamp, lastError, secondsSinceLastEvent: latest ? Math.max(0, Math.floor((now - Date.parse(latest.timestamp)) / 1000)) : undefined };
+  }
   active(): string[] { return [...this.byThread.keys()].filter(id => { const s = this.read(id, 0, 1); return s.currentState === 'running' || s.phase === 'planning' || s.phase === 'running_tests' || s.phase === 'editing_files'; }); }
-  async wait(threadId: string, afterSequence = 0, timeoutMs = 30_000, limit = 50): Promise<ThreadProgressSnapshot> { const first = this.read(threadId, afterSequence, limit); if (first.events.length) return first; return await new Promise(resolve => { const wake = () => { cleanup(); resolve(this.read(threadId, afterSequence, limit)); }; const timer = setTimeout(() => { cleanup(); resolve(this.read(threadId, afterSequence, limit)); }, Math.min(Math.max(timeoutMs, 0), 30_000)); const set = this.waiters.get(threadId) ?? new Set<() => void>(); set.add(wake); this.waiters.set(threadId, set); const cleanup = () => { clearTimeout(timer); set.delete(wake); if (!set.size) this.waiters.delete(threadId); }; }); }
+  async wait(threadId: string, afterSequence = 0, timeoutMs = 30_000, limit = 50): Promise<ThreadProgressSnapshot> {
+    const first = this.read(threadId, afterSequence, limit);
+    if (first.events.length) return first;
+    return await new Promise(resolve => {
+      const settle = () => { cleanup(); resolve(this.read(threadId, afterSequence, limit)); };
+      const wake = () => { settle(); };
+      const timer = setTimeout(() => { settle(); }, Math.min(Math.max(timeoutMs, 0), 30_000));
+      const set = this.waiters.get(threadId) ?? new Set<() => void>(); set.add(wake); this.waiters.set(threadId, set);
+      const cleanup = () => { clearTimeout(timer); set.delete(wake); if (!set.size) this.waiters.delete(threadId); };
+    });
+  }
 }
 
 export class DesktopEventClient {
@@ -56,5 +87,5 @@ export class DesktopEventClient {
   start(): void { if (this.running || this.disposed) return; this.running = true; void this.loop(); }
   dispose(): void { this.disposed = true; this.controller?.abort(); this.store.setConnected(false); }
   private async loop(): Promise<void> { let delay = 250; while (!this.disposed) { this.controller = new AbortController(); try { const launchId = this.launchId(); const response = await fetch(new URL('/api/events', this.base()), { headers: { accept:'text/event-stream', ...(launchId ? {'x-freebuff-launch-id':launchId} : {}) }, signal:this.controller.signal }); if (!response.ok || !response.body) { if ((response.status === 401 || response.status === 403 || response.status === 404) && this.refresh) await this.refresh(); throw new Error(`SSE HTTP ${response.status}`); } this.store.setConnected(true); delay = 250; await this.consume(response.body); } catch { this.store.setConnected(false); } finally { this.controller = undefined; } if (!this.disposed) { await new Promise<void>(resolve => { const timer = setTimeout(resolve, delay); timer.unref?.(); }); delay = Math.min(delay * 2, 10_000); } } this.running = false; }
-  private async consume(body: ReadableStream<Uint8Array>): Promise<void> { const reader = body.getReader(); const decoder = new TextDecoder(); let buffer = ''; try { while (!this.disposed) { const part = await reader.read(); if (part.done) break; buffer += decoder.decode(part.value, { stream:true }); if (buffer.length > MAX_FRAME * 2) throw new Error('SSE buffer too large'); let boundary; while ((boundary = buffer.search(/\n\s*\n/)) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary).replace(/^\n\s*\n/, ''); const parsed = parseSseFrame(frame); if (!parsed?.data) continue; try { const payload = JSON.parse(parsed.data) as unknown; const normalized = normalizeProgressEvent(payload, parsed.event); if (normalized) this.store.append(normalized); } catch { /* malformed events are ignored */ } } } } finally { reader.releaseLock(); } }
+  private async consume(body: ReadableStream<Uint8Array>): Promise<void> { const reader = body.getReader(); const decoder = new TextDecoder(); let buffer = ''; try { while (!this.disposed) { const part = await reader.read(); if (part.done) break; this.store.noteActivity(); buffer += decoder.decode(part.value, { stream:true }); if (buffer.length > MAX_FRAME * 2) throw new Error('SSE buffer too large'); let boundary; while ((boundary = buffer.search(/\n\s*\n/)) >= 0) { const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary).replace(/^\n\s*\n/, ''); const parsed = parseSseFrame(frame); if (!parsed?.data) continue; try { const payload = JSON.parse(parsed.data) as unknown; const normalized = normalizeProgressEvent(payload, parsed.event); if (normalized) this.store.append(normalized); } catch { /* malformed events are ignored */ } } } } finally { reader.releaseLock(); } }
 }

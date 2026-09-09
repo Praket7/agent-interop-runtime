@@ -26,7 +26,8 @@ test('stores bounded incremental progress and wakes waiters', async () => {
   store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'completed', state:'completed' });
   const snapshot = await pending;
   assert.equal(snapshot.events[0]?.kind, 'completed');
-  assert.equal(snapshot.nextSequence, 3);
+  // AI-04 round-trip contract: next is the last delivered sequence.
+  assert.equal(snapshot.next, 2);
   assert.equal(snapshot.currentState, 'completed');
   assert.equal(snapshot.connected, true);
 });

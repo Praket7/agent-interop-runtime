@@ -47,8 +47,11 @@ test('Claude ACP adapter uses session/new prompt and cancel', async () => {
   const session = await adapter.createSession({ cwd: 'C:/repo' });
   assert.equal(session.id, 'claude-code:session-1');
   assert.equal((await adapter.send('session-1', 'inspect this')).accepted, true);
+  // AI-12: ACP cancellation is a notification; it never appears as a request call and
+  // a no-reply provider does not time out.
   assert.equal((await adapter.cancel('session-1')).accepted, true);
-  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'session/new', 'session/prompt', 'session/cancel']);
+  assert.equal(mock.calls.filter((call) => call.method === 'session/cancel').length, 0);
+  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'session/new', 'session/prompt']);
   assert.deepEqual(mock.calls[2]?.params, { sessionId: 'session-1', prompt: [{ type: 'text', text: 'inspect this' }] });
 });
 

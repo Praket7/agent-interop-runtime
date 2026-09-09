@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
-export type VerificationCommandName = 'test' | 'lint' | 'typecheck' | 'build';
+export type VerificationCommandName = 'test' | 'lint' | 'typecheck' | 'build' | `check${number}`;
 
 export interface VerificationCommand {
   executable: string;
@@ -203,21 +203,22 @@ export async function verify(options: VerificationOptions = {}): Promise<Verific
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) throw new RangeError('timeoutMs must be a positive integer');
   const commands = options.commands ?? {};
   const results: CommandEvidence[] = [];
-  for (const name of COMMAND_NAMES) {
+  for (const name of Object.keys(commands) as VerificationCommandName[]) {
     const command = commands[name];
     if (command) results.push(await runCommand(name, command, { cwd, maxOutputBytes, timeoutMs, env: options.env }));
   }
   return { commands: results, git: options.git === false ? null : await collectGitEvidence(cwd) };
 }
 
-export async function repositoryDiff(cwd: string): Promise<{ cwd: string; diff: string; status: string; trust: 'repository_verified'; untracked: string[]; commit: string; repoRoot: string }> {
+export interface RepositoryDiffResult { cwd: string; diff: string; status: string; trust: 'repository_verified'; untracked: string[]; commit: string; repoRoot: string; /** Declared truncation metadata (section 4): reviewers must know what they have not seen. */ diffTruncated: boolean; diffTotalBytes: number; statusTruncated: boolean; statusTotalBytes: number; }
+export async function repositoryDiff(cwd: string): Promise<RepositoryDiffResult> {
   const root = resolve(cwd);
   const rootResult = await runGit(['rev-parse', '--show-toplevel'], root);
   if (rootResult.exitCode !== 0 || !rootResult.stdout.trim()) throw new Error(`No Git repository found for ${root}`);
   const repoRoot = resolve(rootResult.stdout.trim());
   const [diff, status, commit, untracked] = await Promise.all([runGit(['diff', 'HEAD', '--no-ext-diff', '--binary'], repoRoot), runGit(['status', '--short'], repoRoot), runGit(['rev-parse', 'HEAD'], repoRoot), runGit(['ls-files', '--others', '--exclude-standard'], repoRoot)]);
   if (diff.exitCode !== 0 || status.exitCode !== 0 || commit.exitCode !== 0) throw new Error(`Git evidence collection failed: ${diff.stderr || status.stderr || commit.stderr}`);
-  return { cwd: root, repoRoot, commit: commit.stdout.trim(), diff: diff.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), status: status.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), untracked: untracked.stdout.split(/\r?\n/).filter(Boolean), trust: 'repository_verified' };
+  return { cwd: root, repoRoot, commit: commit.stdout.trim(), diff: diff.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), status: status.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), untracked: untracked.stdout.split(/\r?\n/).filter(Boolean), trust: 'repository_verified', diffTruncated: diff.stdout.length > DEFAULT_MAX_OUTPUT_BYTES, diffTotalBytes: diff.stdout.length, statusTruncated: status.stdout.length > DEFAULT_MAX_OUTPUT_BYTES, statusTotalBytes: status.stdout.length };
 }
 
 function parseLegacyCommand(command: string): VerificationCommand {
@@ -231,7 +232,7 @@ export async function runVerification(cwd: string, commands: readonly string[]):
 export async function runVerification(options?: VerificationOptions): Promise<VerificationResult>;
 export async function runVerification(first?: string | VerificationOptions, legacyCommands?: readonly string[]): Promise<CommandEvidence[] | VerificationResult> {
   if (typeof first === 'string') {
-    const commandNames: readonly VerificationCommandName[] = ['test', 'lint', 'typecheck', 'build'];
+    const commandNames: readonly VerificationCommandName[] = ['test', 'lint', 'typecheck', 'build', 'check1', 'check2', 'check3', 'check4'];
     const results: CommandEvidence[] = [];
     for (const [index, command] of (legacyCommands ?? []).entries()) {
       results.push(await runCommand(commandNames[index % commandNames.length]!, parseLegacyCommand(command), { cwd: resolve(first), maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES, timeoutMs: DEFAULT_TIMEOUT_MS, env: undefined }));

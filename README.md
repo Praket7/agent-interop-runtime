@@ -53,8 +53,8 @@ agent-interop-runtime doctor
 You can also use the package without a global install.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.9 doctor
-pnpm dlx agent-interop-runtime@0.2.9 serve
+pnpm dlx agent-interop-runtime@0.2.11 doctor
+pnpm dlx agent-interop-runtime@0.2.11 serve
 ```
 
 The version is pinned in the examples so a host does not silently change behavior during startup. Update the version deliberately after reviewing a release.
@@ -81,8 +81,8 @@ enabled = true
 The installer can add or repair this entry.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.9 install
-pnpm dlx agent-interop-runtime@0.2.9 install --write
+pnpm dlx agent-interop-runtime@0.2.11 install
+pnpm dlx agent-interop-runtime@0.2.11 install --write
 ```
 
 The write command preserves unrelated Codex configuration, makes one backup, uses an atomic replacement, and refuses malformed existing content. Set `CODEX_HOME` when Codex uses a nonstandard configuration directory.
@@ -171,6 +171,30 @@ Set `OPENCODE_SERVER_URL` for another local port. Remote OpenCode requires `OPEN
 Codex requires its app server to be installed and discoverable. Claude requires `claude-code-acp`. Cursor requires the `agent` command with ACP support. Provider credentials and client approvals remain user actions.
 
 Model selection, agent selection, and reasoning selection are separate controls. A provider capability report identifies which controls are real. OpenCode model selection is a next prompt override using `providerID` and `modelID`. OpenCode native session model mutation is not advertised because the validated server API does not provide that operation.
+
+## Toolset profiles
+
+Write-enabled servers can expose a reduced catalog for hosts with tight context budgets. Profiles only remove tools; a tool present in two profiles behaves identically, and the default profile is unchanged from earlier releases.
+
+```text
+INTEROP_TOOLS_PROFILE=core   # unified provider control, coordinator messaging, handoffs, work/evidence
+INTEROP_TOOLS_PROFILE=legacy # core plus per-provider Freebuff thread tools and conversation bookkeeping
+INTEROP_TOOLS_PROFILE=full   # every tool (default)
+```
+
+The stdio server also accepts `--profile core` (and `legacy`/`full`). `freebuff_status` reports the active profile. Read-only mode (`INTEROP_READ_ONLY=1`) composes with any profile. Unknown profile values fail startup with the supported list.
+
+## Benchmarks
+
+An offline two-provider benchmark harness measures fixed handoff tasks end to end: payload bytes, token estimates (js-tiktoken `o200k_base` — an offline estimate, not native provider usage), and duplicate-delivery counters for events, messages, and provider sends.
+
+```text
+pnpm bench
+```
+
+The harness runs entirely in memory against the real store and registry contracts; no live provider is contacted and no usage or dollar savings are claimed.
+
+Handoff packets are measured against a token budget (`INTEROP_HANDOFF_TOKEN_BUDGET`, default 2,000). The durable record keeps every field; the delivery packet lists oversized fields as explicit omissions with instructions for requesting them. CI runs the same harness as a gate (`pnpm bench:check`) and fails on any duplicate event/message delivery or duplicate provider send.
 
 ## Shared conversations
 

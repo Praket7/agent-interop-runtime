@@ -86,6 +86,27 @@ function desktopReadinessCandidates(): string[] {
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
+/**
+ * AI-15: one shared endpoint boundary for every readiness source. Only normalized loopback
+ * http(s) URLs pass; remote, malformed, and non-http candidates are rejected before any
+ * credential-bearing request can be built.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '::') return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return false;
+}
+function isLoopbackHttpUrl(value: string): boolean {
+  try { const url = new URL(value); return (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHostname(url.hostname); } catch { return false; }
+}
+/** Exported for boundary tests; behavior is identical to the internal check. */
+export { isLoopbackHttpUrl as isLoopbackHttpUrlCheck };
+function assertLoopbackCandidateUrl(value: string): string {
+  if (!isLoopbackHttpUrl(value)) throw new Error(`Rejected non-loopback readiness candidate ${value}`);
+  return value;
+}
 function readinessIsFresh(value: Record<string, unknown> | null): boolean {
   const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
   if (freshnessValue === undefined) return true;
@@ -114,7 +135,8 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
       const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
-      const url = asString(value?.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
+      // AI-15: readiness-file URLs pass the same loopback boundary as FREEBUFF_ORCHESTRATOR_URL.
+      const url = asString(value?.url) ? assertLoopbackCandidateUrl(asString(value?.url)!) : (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
       const launchId = launchIdFrom(value);
       const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
       const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
@@ -125,8 +147,7 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   if (process.env.FREEBUFF_ORCHESTRATOR_URL) {
     try {
       const configured = new URL(process.env.FREEBUFF_ORCHESTRATOR_URL);
-      const loopback = configured.hostname === '127.0.0.1' || configured.hostname === 'localhost' || configured.hostname === '::1';
-      if (loopback && (configured.protocol === 'http:' || configured.protocol === 'https:')) candidates.push({ url: configured.toString(), launchId: process.env.FREEBUFF_LAUNCH_ID });
+      if (isLoopbackHttpUrl(configured.toString())) candidates.push({ url: configured.toString(), launchId: process.env.FREEBUFF_LAUNCH_ID });
     } catch { /* ignore malformed or remote orchestrator URLs */ }
   }
   const urls = new Set<string>();
@@ -174,13 +195,14 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
     if (seen.has(candidate.url)) continue;
     seen.add(candidate.url);
     try {
-      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) };
+      assertLoopbackCandidateUrl(candidate.url); // AI-15: re-validate at the fetch boundary.
+      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}), redirect: 'error' };
       let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
       if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 404)) {
         const refreshed = await refreshDesktopLaunchId(candidate.launchId);
         if (refreshed && refreshed !== candidate.launchId) {
           candidate.launchId = refreshed;
-          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed };
+          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed, redirect: 'error' };
           response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
         }
       }
@@ -194,7 +216,7 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
         }
       }
       if (candidate.launchId) {
-        const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+        const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers: { ...headers, redirect: 'error' } });
         if (!health.ok) continue;
       }
       return candidate;
