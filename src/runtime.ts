@@ -133,8 +133,26 @@ function launchIdFromText(text: string): string | undefined {
 export function desktopProcessListArgs(platform = process.platform): string[] {
   return platform === 'darwin' ? ['eww', '-ax'] : ['-eww', '-ax'];
 }
+async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return null;
+  try {
+    const { stdout } = await execFileAsync('ps', ['eww', '-Ao', 'pid,command'], { timeout: 2000 });
+    for (const line of stdout.split('\n')) {
+      if (!line.includes('orchestrator.js')) continue;
+      const pid = Number(line.match(/^\s*(\d+)/)?.[1]);
+      const launchId = line.match(/FREEBUFF_LAUNCH_ID=([^\s]+)/)?.[1];
+      if (!launchId || !Number.isInteger(pid) || pid <= 0) continue;
+      const { stdout: sockets } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 2000 });
+      const port = Number(sockets.match(/TCP\s+127\.0\.0\.1:(\d+)\s+\(LISTEN\)/)?.[1]);
+      if (port > 0 && port < 65536) return { url: `http://127.0.0.1:${port}`, launchId, pid, freshness: Date.now() };
+    }
+  } catch { /* process inspection is best effort */ }
+  return null;
+}
 async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
+  const live = await discoverLiveFreebuffProcess();
+  if (live) candidates.push(live);
   for (const file of desktopReadinessCandidates()) {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
@@ -184,6 +202,8 @@ async function refreshDesktopLaunchId(rejected?: string): Promise<string | undef
   }
   const configured = process.env.FREEBUFF_LAUNCH_ID;
   if (configured && (!rejected || configured !== rejected)) return configured;
+  const live = await discoverLiveFreebuffProcess();
+  if (live?.launchId && (!rejected || live.launchId !== rejected)) return live.launchId;
   try {
     const processText = process.platform === 'win32'
       ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"], { timeout: 2500 })).stdout
