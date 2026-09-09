@@ -259,8 +259,12 @@ export class DesktopOrchestratorRuntime implements Runtime {
     try {
       const launchId = this.launchId;
       const response = await fetch(new URL(pathname, this.base), { method, signal: controller.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(launchId ? { 'x-freebuff-launch-id': launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
-      if (!response.ok) throw new Error(`Freebuff returned HTTP ${response.status}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`);
       const raw = await response.text();
+      if (!response.ok) {
+        let detail = raw;
+        try { const parsed = asRecord(JSON.parse(raw)); detail = asString(parsed?.error) ?? asString(parsed?.message) ?? raw; } catch { /* preserve plain-text errors */ }
+        throw new Error(`Freebuff returned HTTP ${response.status}: ${detail.slice(0, 500)}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`);
+      }
       return (raw ? JSON.parse(raw) : undefined) as T;
     } finally { clearTimeout(timer); }
   }

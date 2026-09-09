@@ -31,6 +31,23 @@ test('Desktop runtime probes /api/projects and never infers write authorization 
   }
 });
 
+test('Desktop provider errors preserve the actionable API reason', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
+  process.env.FREEBUFF_LAUNCH_ID = 'detail-test-launch';
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith('/api/projects')) return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (url.endsWith('/healthz')) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    if (url.endsWith('/message')) return new Response(JSON.stringify({ error: 'effort is not supported by the selected model' }), { status: 400 });
+    return new Response(null, { status: 200 });
+  };
+  try {
+    const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55354');
+    await assert.rejects(() => runtime.sendMessage('thread-1', 'hello'), /effort is not supported by the selected model/);
+  } finally { globalThis.fetch = previousFetch; if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch; }
+});
+
 test('Desktop runtime enables writes only after /healthz verifies the dynamic launch id', async () => {
   const previousFetch = globalThis.fetch;
   const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
