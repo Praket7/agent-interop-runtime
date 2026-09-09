@@ -88,6 +88,38 @@ test('Desktop refreshes its port and launch ID after a restart and retries the w
   }
 });
 
+test('stale explicit Desktop URL falls back to the newly discovered port', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousReady = process.env.FREEBUFF_DESKTOP_READINESS_FILE;
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
+  const directory = await fs.mkdtemp(`${os.tmpdir()}${pathSep()}`);
+  const readiness = `${directory}/readiness.json`;
+  await fs.writeFile(readiness, JSON.stringify({ url: 'http://127.0.0.1:55360', launchId: 'new-launch-id', timestamp: new Date().toISOString() }));
+  process.env.FREEBUFF_DESKTOP_READINESS_FILE = readiness;
+  process.env.FREEBUFF_LAUNCH_ID = 'new-launch-id';
+  const ports: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    ports.push(url.port);
+    if (url.port === '55360' && url.pathname === '/api/projects') return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (url.port === '55360' && url.pathname === '/healthz') return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    if (url.port === '55360' && url.pathname === '/api/events') return new Response(null, { status: 200 });
+    return new Response('offline', { status: 503 });
+  };
+  const runtime = new DesktopOrchestratorRuntime('http://127.0.0.1:55359');
+  try {
+    assert.equal((await runtime.capabilities()).readOnly, false);
+    assert.equal(ports.includes('55359'), true);
+    assert.equal(ports.includes('55360'), true);
+  } finally {
+    runtime.dispose(); globalThis.fetch = previousFetch; await fs.rm(directory, { recursive: true, force: true });
+    if (previousReady === undefined) delete process.env.FREEBUFF_DESKTOP_READINESS_FILE; else process.env.FREEBUFF_DESKTOP_READINESS_FILE = previousReady;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
+  }
+});
+
 test('stale readiness metadata is ignored during authorization refresh', async () => {
   const previousFetch = globalThis.fetch;
   const previousFile = process.env.FREEBUFF_DESKTOP_READINESS_FILE;

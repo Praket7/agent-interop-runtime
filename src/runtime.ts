@@ -253,27 +253,37 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async refreshDesktopConnection(): Promise<boolean> {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
-      const candidate = this.explicitBase ? { url: this.explicitBase, launchId: await refreshDesktopLaunchId(this.rejectedLaunchId) } : await discoverDesktopCandidate();
-      if (!candidate) { this.invalidateConnection(); return false; }
-      this.base = new URL(candidate.url);
-      this.launchId = candidate.launchId;
-      if (candidate.launchId && candidate.launchId !== this.rejectedLaunchId) this.rejectedLaunchId = undefined;
-      try {
-        const projects = await this.rawRequest<unknown>('GET', '/api/projects');
-        const projectRecord = asRecord(projects);
-        if (!projectRecord || !Array.isArray(projectRecord.projects)) throw new Error('invalid /api/projects response');
-        let writable = false;
-        if (this.launchId) {
-          try {
-            const health = await this.rawRequest<unknown>('GET', '/healthz');
-            writable = asRecord(health)?.ok === true;
-          } catch { writable = false; }
-        }
-        this.events.start();
-        this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] };
-        this.capsAt = Date.now();
-        return writable;
-      } catch { this.invalidateConnection(); return false; }
+      const discovered = await discoverDesktopCandidates();
+      const candidates: DesktopCandidate[] = this.explicitBase
+        ? [{ url: this.explicitBase, launchId: await refreshDesktopLaunchId(this.rejectedLaunchId) }, ...discovered]
+        : discovered;
+      const seen = new Set<string>();
+      for (const candidate of candidates) {
+        if (seen.has(candidate.url)) continue;
+        seen.add(candidate.url);
+        try {
+          assertLoopbackCandidateUrl(candidate.url);
+          this.base = new URL(candidate.url);
+          this.launchId = candidate.launchId;
+          if (candidate.launchId && candidate.launchId !== this.rejectedLaunchId) this.rejectedLaunchId = undefined;
+          const projects = await this.rawRequest<unknown>('GET', '/api/projects');
+          const projectRecord = asRecord(projects);
+          if (!projectRecord || !Array.isArray(projectRecord.projects)) throw new Error('invalid /api/projects response');
+          let writable = false;
+          if (this.launchId) {
+            try {
+              const health = await this.rawRequest<unknown>('GET', '/healthz');
+              writable = asRecord(health)?.ok === true;
+            } catch { writable = false; }
+          }
+          this.events.start();
+          this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] };
+          this.capsAt = Date.now();
+          return writable;
+        } catch { /* stale explicit endpoints and failed discovered candidates are skipped */ }
+      }
+      this.invalidateConnection();
+      return false;
     })().finally(() => { this.refreshing = undefined; });
     return this.refreshing;
   }
