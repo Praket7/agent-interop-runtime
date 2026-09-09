@@ -129,6 +129,10 @@ function launchIdFromText(text: string): string | undefined {
   const match = text.match(/(?:x-freebuff-launch-id|freebuff[-_ ]launch[-_ ]id|launchId|launch_id|authorizationToken|authToken)\s*[:=]\s*["']?([A-Za-z0-9._~+/=-]{8,512})/i);
   return match?.[1];
 }
+/** macOS `ps` requires the `eww` display flags before `-ax` to include environments. */
+export function desktopProcessListArgs(platform = process.platform): string[] {
+  return platform === 'darwin' ? ['eww', '-ax'] : ['-eww', '-ax'];
+}
 async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
   for (const file of desktopReadinessCandidates()) {
@@ -178,16 +182,17 @@ async function refreshDesktopLaunchId(rejected?: string): Promise<string | undef
   for (const log of desktopLogCandidates()) {
     try { const found = launchIdFromText(await fs.readFile(log, 'utf8')); if (found && (!rejected || found !== rejected)) return found; if (found) fallback = found; } catch { /* optional */ }
   }
+  const configured = process.env.FREEBUFF_LAUNCH_ID;
+  if (configured && (!rejected || configured !== rejected)) return configured;
   try {
     const processText = process.platform === 'win32'
       ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"], { timeout: 2500 })).stdout
-      : (await execFileAsync('ps', ['-eww', '-ax'], { timeout: 2500 })).stdout;
+      : (await execFileAsync('ps', desktopProcessListArgs(), { timeout: 2500 })).stdout;
     const found = launchIdFromText(processText);
     if (found && (!rejected || found !== rejected)) return found;
     if (found) fallback = found;
   } catch { /* process inspection is optional and may be restricted */ }
-  const configured = process.env.FREEBUFF_LAUNCH_ID;
-  return configured && (!rejected || configured !== rejected) ? configured : fallback;
+  return fallback;
 }
 async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
   const seen = new Set<string>();

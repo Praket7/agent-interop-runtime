@@ -2,8 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { DesktopOrchestratorRuntime, detectRuntime } from '../src/runtime.js';
+import { DesktopOrchestratorRuntime, detectRuntime, desktopProcessListArgs } from '../src/runtime.js';
 import { createServer } from '../src/mcp.js';
+
+test('Desktop launch-ID process inspection includes environments on every supported OS', () => {
+  assert.deepEqual(desktopProcessListArgs('darwin'), ['eww', '-ax']);
+  assert.deepEqual(desktopProcessListArgs('linux'), ['-eww', '-ax']);
+  assert.deepEqual(desktopProcessListArgs('win32'), ['-eww', '-ax']);
+});
 
 test('Desktop runtime probes /api/projects and never infers write authorization from an env var', async () => {
   const previousFetch = globalThis.fetch;
