@@ -7,12 +7,12 @@
     "url": "https://github.com/Praket7/agent-interop-runtime",
     "source": "github"
   },
-  "version": "0.2.11",
+  "version": "0.2.12",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agent-interop-runtime",
-      "version": "0.2.11",
+      "version": "0.2.12",
       "transport": { "type": "stdio" }
     }
   ]

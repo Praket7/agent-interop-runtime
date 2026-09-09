@@ -53,8 +53,8 @@ agent-interop-runtime doctor
 You can also use the package without a global install.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.11 doctor
-pnpm dlx agent-interop-runtime@0.2.11 serve
+pnpm dlx agent-interop-runtime@0.2.12 doctor
+pnpm dlx agent-interop-runtime@0.2.12 serve
 ```
 
 The version is pinned in the examples so a host does not silently change behavior during startup. Update the version deliberately after reviewing a release.
@@ -81,8 +81,8 @@ enabled = true
 The installer can add or repair this entry.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.11 install
-pnpm dlx agent-interop-runtime@0.2.11 install --write
+pnpm dlx agent-interop-runtime@0.2.12 install
+pnpm dlx agent-interop-runtime@0.2.12 install --write
 ```
 
 The write command preserves unrelated Codex configuration, makes one backup, uses an atomic replacement, and refuses malformed existing content. Set `CODEX_HOME` when Codex uses a nonstandard configuration directory.
