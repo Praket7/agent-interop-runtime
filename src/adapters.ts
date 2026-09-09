@@ -1,17 +1,46 @@
 import fs from 'node:fs/promises';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams, execFile as nodeExecFile } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
 import type { Json } from './types.js';
 import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, OperationReceipt, ProviderId, AgentSendOptions, ModelSelection } from './interop.js';
 import { VERSION } from './version.js';
 import { safeProjectPath } from './security.js';
+import { promisify } from 'node:util';
 
 const now = () => new Date().toISOString();
 const text = (v: unknown) => typeof v === 'string' ? v : undefined;
 const record = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const json = (v: unknown): Json => JSON.parse(JSON.stringify(v ?? null)) as Json;
 const cap = (supported: boolean, transport: string, protocol: string, reason?: string) => ({ supported, state: supported ? 'available' as const : 'unavailable' as const, transport, protocol, reason });
+const execFile = promisify(nodeExecFile);
+
+/** Discover a locally running OpenCode server instead of assuming port 4096. */
+async function discoverOpenCodeUrl(): Promise<URL | undefined> {
+  const candidates = new Set<string>();
+  if (process.env.OPENCODE_SERVER_URL) candidates.add(process.env.OPENCODE_SERVER_URL);
+  candidates.add('http://127.0.0.1:4096');
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 | Select-Object -ExpandProperty LocalPort"], { timeout: 2000 });
+      for (const p of stdout.match(/\b\d{2,5}\b/g) ?? []) candidates.add(`http://127.0.0.1:${p}`);
+    } else {
+      const { stdout } = await execFile('sh', ['-c', "command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP -sTCP:LISTEN -a -4 -F n | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p'"], { timeout: 2000 });
+      for (const p of stdout.match(/\b\d{2,5}\b/g) ?? []) candidates.add(`http://127.0.0.1:${p}`);
+    }
+  } catch { /* fallback to explicit/default endpoint */ }
+  for (const value of candidates) {
+    try {
+      const url = new URL(value);
+      if (!isLoopbackHost(url.hostname)) continue;
+      const response = await fetch(new URL('/global/health', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders() });
+      if (response.ok) return url;
+      const sessions = await fetch(new URL('/session', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders() });
+      if (sessions.ok && Array.isArray(await sessions.json())) return url;
+    } catch { /* try the next local listener */ }
+  }
+  return undefined;
+}
 class OpenCodeHttpError extends Error { constructor(readonly status: number, readonly providerDetail: string) { super(`OpenCode HTTP ${status}: ${providerDetail}`); } }
 
 /** Normalized loopback check shared by request and event paths (AI-07). */
@@ -41,7 +70,7 @@ export class OpenCodeAdapter implements AgentAdapter {
   private readonly eventSequences = new Map<string, number>();
   constructor(base = process.env.OPENCODE_SERVER_URL ?? 'http://127.0.0.1:4096') { this.base = new URL(base); }
   private get remoteWithoutAuth(): boolean { return !isLoopbackHost(this.base.hostname) && !opencodeAuthHeaders().authorization; }
-  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD (a password alone uses the documented default username)'); const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }
+  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD (a password alone uses the documented default username)'); const run = async () => { const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }; try { return await run(); } catch (error) { const discovered = await discoverOpenCodeUrl(); if (!discovered || discovered.href === this.base.href) throw error; this.base = discovered; return run(); } }
   private modelBody(selection: NonNullable<AgentSendOptions['model']>, field: 'modelID' | 'id') { return { providerID: selection.providerID, [field]: selection.modelID }; }
   private async requestWithModelFallback<T>(method: string, route: string, selection: NonNullable<AgentSendOptions['model']>, body: (model: Record<string, unknown>) => unknown): Promise<T> { try { return await this.request<T>(method, route, body(this.modelBody(selection, 'modelID'))); } catch (error) { if (!(error instanceof OpenCodeHttpError) || error.status !== 400 || !/(modelID|model id|unknown field|invalid model|expected id)/i.test(error.providerDetail)) throw error; return this.request<T>(method, route, body(this.modelBody(selection, 'id'))); } }
   async capabilities(): Promise<AgentCapabilities> { this.lastError = undefined; try { await this.request('GET', '/global/health'); this.available = true; } catch (first) { try { const sessions = await this.request<unknown>('GET', '/session'); if (!Array.isArray(sessions)) throw new Error('OpenCode /session returned malformed response'); this.available = true; } catch (error) { this.available = false; this.lastError = error instanceof Error ? error.message : String(error); } } const reason = this.available ? undefined : this.lastError ?? 'Start opencode serve --hostname 127.0.0.1 --port 4096 or set OPENCODE_SERVER_URL'; return { provider: this.id, adapterVersion: VERSION, authorization: this.available ? 'authorized' : 'unknown', discovery: cap(this.available, 'http', 'OpenCode server API', reason), sessions: cap(this.available, 'http', 'OpenCode session API', reason), sendMessage: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), steer: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), cancel: cap(this.available, 'http', 'POST /session/:id/abort', reason), events: cap(this.available, 'http', 'GET /event with reconnect', reason), diff: cap(this.available, 'http', 'GET /session/:id/diff', reason), permissions: cap(this.available, 'http', 'POST /session/:id/permissions/:permissionID', reason), model: cap(false, 'OpenCode prompt request', 'OpenCode server API', this.available ? 'Native session model mutation is not exposed by the validated API. Pass model on agent_send.' : reason), reasoning: cap(this.available, 'OpenCode prompt request', 'OpenCode model variant', this.available ? 'Mapped to the selected OpenCode model variant on the next prompt.' : reason), limitations: ['Existing session attachment requires a reachable OpenCode server', 'Accepted means the OpenCode HTTP endpoint accepted the prompt; it does not mean the agent completed it', 'Model selection is an explicit next prompt override, not persistent session mutation'] }; }
