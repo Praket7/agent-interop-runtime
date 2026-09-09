@@ -109,6 +109,10 @@ x-freebuff-launch-id
 
 The runtime searches local readiness and log locations for the current launch ID. It verifies the ID through the local health route before registering mutation tools. If Desktop rotates the ID, a rejected request triggers a fresh discovery and one safe retry. If the ID cannot be verified the runtime remains read only.
 
+The connection is refreshed before every Desktop write. Capability results are cached only briefly. A restart can therefore change both the loopback port and the launch ID without requiring an MCP restart. The event stream uses the same refreshed connection when it reconnects after an authorization failure.
+
+For a controlled deployment the readiness file can be supplied with `FREEBUFF_DESKTOP_READINESS_FILE`. The file must contain a loopback URL or port and a current launch ID. Records older than ten minutes are ignored.
+
 Desktop messaging uses the local route below.
 
 ```text

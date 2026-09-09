@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { DesktopOrchestratorRuntime, detectRuntime } from '../src/runtime.js';
 import { createServer } from '../src/mcp.js';
 
@@ -44,6 +46,81 @@ test('Desktop runtime enables writes only after /healthz verifies the dynamic la
     if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
   }
 });
+
+test('Desktop refreshes its port and launch ID after a restart and retries the write', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
+  let activePort = 55354;
+  let activeLaunch = 'old-launch-id';
+  const seen: string[] = [];
+  process.env.FREEBUFF_ORCHESTRATOR_URL = 'http://127.0.0.1:55354';
+  process.env.FREEBUFF_LAUNCH_ID = activeLaunch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const launch = String((init?.headers as Record<string, string> | undefined)?.['x-freebuff-launch-id'] ?? '');
+    if (url.port !== String(activePort)) return new Response('offline', { status: 503 });
+    if (url.pathname === '/api/projects') return launch === activeLaunch ? new Response(JSON.stringify({ projects: [] }), { status: 200 }) : new Response('forbidden', { status: 403 });
+    if (url.pathname === '/healthz') return launch === activeLaunch ? new Response(JSON.stringify({ ok: true }), { status: 200 }) : new Response('forbidden', { status: 403 });
+    if (url.pathname.endsWith('/message')) {
+      seen.push(`${url.port}:${launch}`);
+      if (launch === 'old-launch-id') {
+        activePort = 55355;
+        activeLaunch = 'new-launch-id';
+        process.env.FREEBUFF_ORCHESTRATOR_URL = 'http://127.0.0.1:55355';
+        process.env.FREEBUFF_LAUNCH_ID = activeLaunch;
+        return new Response('forbidden', { status: 403 });
+      }
+      return new Response(JSON.stringify({ queued: true }), { status: 200 });
+    }
+    if (url.pathname === '/api/events') return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }), { status: 200 });
+    throw new Error(`unexpected ${url}`);
+  };
+  const runtime = new DesktopOrchestratorRuntime();
+  try {
+    assert.equal((await runtime.capabilities()).readOnly, false);
+    assert.deepEqual(await runtime.sendMessage('thread-1', 'hello'), { queued: true });
+    assert.deepEqual(seen, ['55354:old-launch-id', '55355:new-launch-id']);
+  } finally {
+    runtime.dispose(); globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl;
+    if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch;
+  }
+});
+
+test('stale readiness metadata is ignored during authorization refresh', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousFile = process.env.FREEBUFF_DESKTOP_READINESS_FILE;
+  const previousUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+  const previousLaunch = process.env.FREEBUFF_LAUNCH_ID;
+  const directory = await fs.mkdtemp(`${os.tmpdir()}${pathSep()}`);
+  const file = `${directory}/readiness.json`;
+  await fs.writeFile(file, JSON.stringify({ url:'http://127.0.0.1:55356', launchId:'stale-launch-id', timestamp: new Date(Date.now() - 60 * 60_000).toISOString() }));
+  process.env.FREEBUFF_DESKTOP_READINESS_FILE = file;
+  process.env.FREEBUFF_ORCHESTRATOR_URL = 'http://127.0.0.1:55357';
+  process.env.FREEBUFF_LAUNCH_ID = 'fresh-launch-id';
+  const ports: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input)); ports.push(url.port);
+    const launch = String((init?.headers as Record<string, string> | undefined)?.['x-freebuff-launch-id'] ?? '');
+    if (url.port === '55357' && url.pathname === '/api/projects') return new Response(JSON.stringify({ projects: [] }), { status: 200 });
+    if (url.port === '55357' && url.pathname === '/healthz' && launch === 'fresh-launch-id') return new Response(JSON.stringify({ ok:true }), { status:200 });
+    throw new Error(`unexpected ${url}`);
+  };
+  const runtime = new DesktopOrchestratorRuntime();
+  try { assert.equal((await runtime.capabilities()).readOnly, false); assert.equal(ports.includes('55356'), false); }
+  finally { runtime.dispose(); globalThis.fetch = previousFetch; await fs.rm(directory, { recursive:true, force:true }); if (previousFile === undefined) delete process.env.FREEBUFF_DESKTOP_READINESS_FILE; else process.env.FREEBUFF_DESKTOP_READINESS_FILE = previousFile; if (previousUrl === undefined) delete process.env.FREEBUFF_ORCHESTRATOR_URL; else process.env.FREEBUFF_ORCHESTRATOR_URL = previousUrl; if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch; }
+});
+
+test('separate bridge instances refresh independently instead of retaining authorization', async () => {
+  const previousFetch = globalThis.fetch; const previousLaunch = process.env.FREEBUFF_LAUNCH_ID; process.env.FREEBUFF_LAUNCH_ID = 'old-launch-id'; const healthHeaders: string[] = [];
+  globalThis.fetch = async (input, init) => { const url = new URL(String(input)); const launch = String((init?.headers as Record<string, string> | undefined)?.['x-freebuff-launch-id'] ?? ''); if (url.pathname === '/healthz') { healthHeaders.push(launch); return new Response(JSON.stringify({ ok:true }), { status:200 }); } if (url.pathname === '/api/projects') return new Response(JSON.stringify({ projects: [] }), { status:200 }); if (url.pathname === '/api/events') return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }), { status:200 }); throw new Error(`unexpected ${url}`); };
+  const first = new DesktopOrchestratorRuntime('http://127.0.0.1:55358'); const second = new DesktopOrchestratorRuntime('http://127.0.0.1:55358');
+  try { await Promise.all([first.capabilities(), second.capabilities()]); process.env.FREEBUFF_LAUNCH_ID = 'new-launch-id'; await Promise.all([first.refreshDesktopConnection(), second.refreshDesktopConnection()]); assert.deepEqual(healthHeaders.slice(-2), ['new-launch-id', 'new-launch-id']); }
+  finally { first.dispose(); second.dispose(); globalThis.fetch = previousFetch; if (previousLaunch === undefined) delete process.env.FREEBUFF_LAUNCH_ID; else process.env.FREEBUFF_LAUNCH_ID = previousLaunch; }
+});
+
+function pathSep(): string { return process.platform === 'win32' ? '\\' : '/'; }
 
 test('explicit CLI mode takes precedence over Desktop discovery', async () => {
   const previous = process.env.FREEBUFF_MCP_CLI_MODE;

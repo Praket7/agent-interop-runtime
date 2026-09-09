@@ -64,6 +64,7 @@ class JsonRpcProcess {
   private receive(message: RpcMessage) { if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) { const waiter = this.pending.get(message.id); if (!waiter) return; this.pending.delete(message.id); if (message.error) waiter.reject(new Error(message.error.message ?? `JSON RPC error ${message.error.code ?? 'unknown'}`)); else waiter.resolve(message.result); return; } if (message.method && message.id !== undefined) { void this.respond(message); return; } if (message.method) { const params = record(message.params); const sessionId = text(params.sessionId) ?? text(params.session_id) ?? text(params.threadId) ?? text(params.thread_id) ?? text(record(params.session).id); const waiterIndex = sessionId ? this.notificationWaiters.findIndex((waiter) => waiter.sessionId === sessionId) : -1; if (waiterIndex >= 0) { const waiter = this.notificationWaiters.splice(waiterIndex, 1)[0]!; clearTimeout(waiter.timer); waiter.resolve(message); return; } if (sessionId) { const queue = this.notifications.get(sessionId) ?? []; queue.push(message); if (queue.length > 500) queue.shift(); this.notifications.set(sessionId, queue); } else { this.globalNotifications.push(message); if (this.globalNotifications.length > 500) this.globalNotifications.shift(); } } }
   private async respond(message: RpcMessage): Promise<void> { const write = (payload: unknown) => this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, ...payload as object })}\n`); try { const result = this.serverRequest ? await this.serverRequest(message) : undefined; write({ result }); } catch (error) { write({ error: { code: -32000, message: error instanceof Error ? error.message : String(error) } }); } }
   async nextNotification(sessionId: string, timeoutMs = 30_000): Promise<RpcMessage | undefined> { const queue = this.notifications.get(sessionId); const existing = queue?.shift(); if (existing) return existing; if (this.closed) return undefined; return new Promise((resolve) => { const timer = setTimeout(() => { const index = this.notificationWaiters.findIndex((waiter) => waiter.resolve === resolve); if (index >= 0) this.notificationWaiters.splice(index, 1); resolve(undefined); }, timeoutMs); this.notificationWaiters.push({ sessionId, resolve, timer }); }); }
+  get isClosed(): boolean { return this.closed; }
   async request(method: string, params?: unknown, timeoutMs = 2_500): Promise<unknown> { if (this.closed) throw new Error('native protocol is not connected'); const id = ++this.sequence; const payload = JSON.stringify({ jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }) + '\n'; return new Promise((resolve, reject) => { const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`JSON RPC request timed out: ${method}`)); }, timeoutMs); this.pending.set(id, { resolve: (value) => { clearTimeout(timer); resolve(value); }, reject: (error) => { clearTimeout(timer); reject(error); } }); this.child.stdin.write(payload, (error) => { if (error) { clearTimeout(timer); this.pending.delete(id); reject(error); } }); }); }
   notify(method: string, params?: unknown): void { if (this.closed) throw new Error('native protocol is not connected'); this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) })}\n`); }
   close() { if (!this.closed) { this.closed = true; this.child.kill(); for (const waiter of this.notificationWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(undefined); } } }
@@ -83,6 +84,9 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   private initialized = false;
   protected initializeResult: unknown;
   private failure?: string;
+  private failedAt = 0;
+  private connecting?: Promise<boolean>;
+  private ownsProcess = false;
   private readonly sessions = new Map<string, AgentSession>();
   private pendingPermissions = new Map<string, { nativeId: string; resolve: (value: unknown) => void }>();
   constructor(options: NativeAdapterOptions = {}) { this.options = options; this.rpc = options.rpc; }
@@ -95,7 +99,37 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   protected abstract sessionFrom(value: unknown, source: string): AgentSession | null;
   protected async connected(): Promise<boolean> { return this.connect(); }
   protected async handleServerRequest(message: RpcMessage): Promise<unknown> { const params = record(message.params); const sessionId = text(params.sessionId) ?? text(params.threadId) ?? 'unknown'; if (message.method && /request_permission|approval/i.test(message.method)) return await new Promise((resolve) => { this.pendingPermissions.set(`${sessionId}:${String(message.id)}`, { nativeId: sessionId, resolve }); }); if (message.method !== 'fs/read_text_file') throw new Error(`Unsupported provider request ${message.method ?? 'unknown'}`); const requested = text(params.path); if (!requested) throw new Error('ACP file request did not include a path'); const root = (this.sessions.get(sessionId)?.cwd) ?? this.options.cwd ?? process.cwd(); const file = await safeProjectPath(root, requested); const stat = await fs.stat(file); if (stat.size > 1_000_000) throw new Error('ACP file read exceeds the 1 MB safety limit'); const content = await fs.readFile(file, 'utf8'); const line = typeof params.line === 'number' ? Math.max(1, Math.floor(params.line)) : 1; const limit = typeof params.limit === 'number' ? Math.min(10_000, Math.max(1, Math.floor(params.limit))) : undefined; const lines = content.split(/\r?\n/); return { content: lines.slice(line - 1, limit ? line - 1 + limit : undefined).join('\n') }; }
-  private async connect(): Promise<boolean> { if (this.initialized) return true; if (this.failure) return false; try { if (!this.rpc) { const command = this.options.command ?? this.defaultCommand; const args = this.options.args ?? this.defaultArgs; const resolved = this.options.command ? await fs.access(command).then(() => command).catch(() => which(command)) : await which(command); if (!resolved) throw new Error(`${this.label} executable was not found`); this.process = new JsonRpcProcess(resolved, args, this.options.cwd, (message) => this.handleServerRequest(message)); this.rpc = this.process.request.bind(this.process); } this.initializeResult = await this.initialize(); this.initialized = true; return true; } catch (error) { this.failure = error instanceof Error ? error.message : String(error); this.process?.close(); return false; } }
+  private async connect(): Promise<boolean> {
+    if (this.initialized && (!this.ownsProcess || !this.process?.isClosed)) return true;
+    if (this.connecting) return this.connecting;
+    if (this.failure && Date.now() - this.failedAt < 1_500) return false;
+    this.connecting = (async () => {
+      try {
+        this.failure = undefined;
+        this.initialized = false;
+        if (this.ownsProcess && this.process?.isClosed) { this.process = undefined; this.rpc = undefined; this.ownsProcess = false; }
+        const shouldCreateProcess = !this.rpc;
+        if (shouldCreateProcess) {
+          const command = this.options.command ?? this.defaultCommand; const args = this.options.args ?? this.defaultArgs;
+          const resolved = this.options.command ? await fs.access(command).then(() => command).catch(() => which(command)) : await which(command);
+          if (!resolved) throw new Error(`${this.label} executable was not found`);
+          this.process = new JsonRpcProcess(resolved, args, this.options.cwd, (message) => this.handleServerRequest(message));
+          this.rpc = this.process.request.bind(this.process);
+          this.ownsProcess = true;
+        }
+        this.initializeResult = await this.initialize();
+        this.initialized = true;
+        this.failedAt = 0;
+        return true;
+      } catch (error) {
+        this.failure = error instanceof Error ? error.message : String(error);
+        this.failedAt = Date.now();
+        if (this.ownsProcess) { this.process?.close(); this.process = undefined; this.rpc = undefined; this.ownsProcess = false; }
+        return false;
+      } finally { this.connecting = undefined; }
+    })();
+    return this.connecting;
+  }
   protected call(method: string, params?: unknown, timeoutMs = 2_500) { if (!this.rpc) throw new Error(`${this.label} native transport is unavailable`); return this.rpc(method, params, timeoutMs); }
   protected notify(method: string, params?: unknown): void { this.process?.notify(method, params); }
   async capabilities(): Promise<AgentCapabilities> { const ready = await this.connect(); const reason = ready ? undefined : this.failure ?? `${this.label} native transport is unavailable`; return { provider: this.id, adapterVersion: VERSION, authorization: ready ? 'unknown' : 'unauthorized', discovery: cap(ready, 'JSON RPC over stdio', this.protocol, reason), sessions: cap(ready, 'JSON RPC over stdio', this.protocol, reason), sendMessage: cap(ready, 'JSON RPC over stdio', this.protocol, reason), steer: cap(false, 'JSON RPC over stdio', this.protocol, 'Provider protocol has no distinct steer operation'), cancel: cap(ready, 'JSON RPC over stdio', this.protocol, reason), events: cap(ready, 'JSON RPC notifications', this.protocol, ready ? 'Events are live and not replayable after process restart' : reason), diff: cap(false, 'provider native protocol', this.protocol, 'Provider does not expose a stable native diff method'), permissions: cap(ready, 'JSON RPC server requests', this.protocol, ready ? 'Permission requests remain pending until permission_respond is called' : reason), model: cap(false, 'provider native protocol', this.protocol, 'Model selection is not standardized by this transport'), reasoning: cap(false, 'provider native protocol', this.protocol, 'Reasoning selection is not standardized by this transport'), limitations: ['Only documented JSON RPC methods are used', ...(ready ? [] : ['Native control is unavailable until the provider process starts and initializes successfully'])] }; }
@@ -108,7 +142,7 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   async cancel(nativeId: string): Promise<OperationReceipt> { if (!await this.connect()) return { provider: this.id, nativeId, operation: 'cancel', accepted: false, detail: json({ reason: this.failure }) }; await this.interrupt(nativeId); return { provider: this.id, nativeId, operation: 'cancel', accepted: true }; }
   async respondPermission(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const pending = this.pendingPermissions.get(`${nativeId}:${requestId}`); if (!pending) throw new Error(`No pending permission request ${requestId} for ${nativeId}`); this.pendingPermissions.delete(`${nativeId}:${requestId}`); pending.resolve({ outcome: { outcome: decision === 'deny' || decision === 'cancelled' ? decision : 'selected', ...(decision === 'deny' || decision === 'cancelled' ? {} : { optionId: decision }) } }); return { provider: this.id, nativeId, operation: 'permission', accepted: true, status: 'completed', providerState: 'decision_sent' }; }
   async *events(nativeId: string): AsyncIterable<AgentEvent> { if (!await this.connect()) return; let sequence = 0; while (this.process) { const message = await this.process.nextNotification(nativeId); if (!message) return; const raw = record(message.params); yield { provider: this.id, nativeId, sequence: ++sequence, timestamp: now(), type: message.method ?? 'notification', data: json(raw) }; } }
-  dispose() { this.process?.close(); this.process = undefined; this.rpc = undefined; this.initialized = false; }
+  dispose() { this.process?.close(); this.process = undefined; this.rpc = undefined; this.ownsProcess = false; this.initialized = false; this.failure = undefined; this.connecting = undefined; }
 }
 
 export class CodexAdapter extends NativeProtocolAdapter {

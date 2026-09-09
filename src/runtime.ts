@@ -67,6 +67,7 @@ function desktopLogCandidates(): string[] {
 function desktopReadinessCandidates(): string[] {
   const home = os.homedir();
   return [
+    ...(process.env.FREEBUFF_DESKTOP_READINESS_FILE ? [process.env.FREEBUFF_DESKTOP_READINESS_FILE] : []),
     path.join(process.env.APPDATA ?? '', 'Freebuff', 'orchestrator.json'),
     path.join(process.env.APPDATA ?? '', 'Freebuff', 'readiness.json'),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator.json'),
@@ -85,6 +86,12 @@ function desktopReadinessCandidates(): string[] {
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
+function readinessIsFresh(value: Record<string, unknown> | null): boolean {
+  const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
+  if (freshnessValue === undefined) return true;
+  const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : NaN;
+  return Number.isFinite(freshness) && Date.now() - freshness < 10 * 60_000;
+}
 function launchIdFrom(value: Record<string, unknown> | null): string | undefined {
   if (!value) return undefined;
   for (const key of ['launchId', 'launchID', 'launch_id', 'launch-id', 'freebuffLaunchId', 'authorizationToken', 'authToken', 'token']) {
@@ -112,7 +119,7 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
       const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
       const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
       const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
-      if (url && (!freshness || Date.now() - freshness < 10 * 60_000)) candidates.push({ url, launchId, pid: Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined, freshness });
+      if (url && readinessIsFresh(value)) candidates.push({ url, launchId, pid: Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined, freshness });
     } catch { /* readiness metadata is optional */ }
   }
   if (process.env.FREEBUFF_ORCHESTRATOR_URL) {
@@ -141,9 +148,9 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   return [...candidates, ...listeners].sort((a, b) => (b.freshness ?? 0) - (a.freshness ?? 0));
 }
 async function refreshDesktopLaunchId(): Promise<string | undefined> {
-  if (process.env.FREEBUFF_LAUNCH_ID) return process.env.FREEBUFF_LAUNCH_ID;
   for (const file of desktopReadinessCandidates()) {
-    const found = launchIdFrom(await readJson(file) as Record<string, unknown> | null);
+    const value = await readJson(file) as Record<string, unknown> | undefined;
+    const found = readinessIsFresh(value ?? null) ? launchIdFrom(value ?? null) : undefined;
     if (found) return found;
   }
   for (const log of desktopLogCandidates()) {
@@ -156,37 +163,101 @@ async function refreshDesktopLaunchId(): Promise<string | undefined> {
     const found = launchIdFromText(processText);
     if (found) return found;
   } catch { /* process inspection is optional and may be restricted */ }
-  return undefined;
+  return process.env.FREEBUFF_LAUNCH_ID;
 }
 async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
   const seen = new Set<string>();
   for (const candidate of await discoverDesktopCandidates()) {
     if (seen.has(candidate.url)) continue;
     seen.add(candidate.url);
-    try { let headers = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) }; let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!response.ok) continue; if (!candidate.launchId) { candidate.launchId = await refreshDesktopLaunchId(); if (candidate.launchId) { headers = { ...headers, 'x-freebuff-launch-id': candidate.launchId }; response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers }); } } if (candidate.launchId) { const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!health.ok) continue; } return candidate; } catch { /* try the next discovered endpoint */ }
+    try {
+      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) };
+      let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+      if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 404)) {
+        const refreshed = await refreshDesktopLaunchId();
+        if (refreshed && refreshed !== candidate.launchId) {
+          candidate.launchId = refreshed;
+          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed };
+          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+        }
+      }
+      if (!response.ok) continue;
+      if (!candidate.launchId) {
+        candidate.launchId = await refreshDesktopLaunchId();
+        if (candidate.launchId) {
+          headers = { ...headers, 'x-freebuff-launch-id': candidate.launchId };
+          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+          if (!response.ok) continue;
+        }
+      }
+      if (candidate.launchId) {
+        const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+        if (!health.ok) continue;
+      }
+      return candidate;
+    } catch { /* try the next discovered endpoint */ }
   }
   return null;
 }
 
 export class DesktopOrchestratorRuntime implements Runtime {
-  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities; private refreshing?: Promise<string | undefined>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress);
+  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities; private capsAt = 0; private refreshing?: Promise<boolean>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress, () => this.refreshDesktopConnection());
   constructor(base?: string) { this.explicitBase = base; this.base = new URL(base ?? 'http://127.0.0.1'); }
-  private async request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
-    const c = new AbortController(); const timer = setTimeout(() => c.abort(), 5000);
+  private invalidateConnection(): void { this.caps = undefined; this.capsAt = 0; this.launchId = undefined; }
+  private async rawRequest<T>(method: string, pathname: string, body?: unknown): Promise<T> {
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 5000);
     try {
-      const send = () => fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(this.launchId ? { 'x-freebuff-launch-id': this.launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
-      let response = await send();
-      if (response.status === 401 || response.status === 403) {
-        this.caps = undefined;
-        this.refreshing ??= refreshDesktopLaunchId().finally(() => { this.refreshing = undefined; });
-        const refreshed = await this.refreshing;
-        if (refreshed && refreshed !== this.launchId) { this.launchId = refreshed; response = await send(); }
-      }
+      const launchId = this.launchId;
+      const response = await fetch(new URL(pathname, this.base), { method, signal: controller.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(launchId ? { 'x-freebuff-launch-id': launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       if (!response.ok) throw new Error(`Freebuff returned HTTP ${response.status}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`);
-      return await response.json() as T;
+      const raw = await response.text();
+      return (raw ? JSON.parse(raw) : undefined) as T;
     } finally { clearTimeout(timer); }
   }
-  async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const candidate = this.explicitBase ? { url:this.explicitBase, launchId:process.env.FREEBUFF_LAUNCH_ID } : await discoverDesktopCandidate(); if (!candidate) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop or CLI was selected. Desktop readiness metadata, process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL were checked; use install or doctor for setup details.'] }; return this.caps; } this.base = new URL(candidate.url); this.launchId = candidate.launchId; try { const projects = await this.request<unknown>('GET','/api/projects'); const record=asRecord(projects); if (!record || !Array.isArray(record.projects)) throw new Error('invalid /api/projects response'); let writable = false; if (this.launchId) { try { const health = await this.request<unknown>('GET','/healthz'); writable = Boolean(asRecord(health)?.ok === true); } catch { writable = false; } } this.events.start(); this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${candidate.url}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
+  private shouldRefresh(error: unknown, method: string): boolean { const status = String(error).match(/HTTP (401|403|404)\b/)?.[1]; return Boolean(status && (status !== '404' || method !== 'GET')); }
+  private async request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
+    try { return await this.rawRequest<T>(method, pathname, body); }
+    catch (error) {
+      if (!this.shouldRefresh(error, method)) throw error;
+      this.invalidateConnection();
+      if (!await this.refreshDesktopConnection()) throw error;
+      return this.rawRequest<T>(method, pathname, body);
+    }
+  }
+  async refreshDesktopConnection(): Promise<boolean> {
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = (async () => {
+      const candidate = this.explicitBase ? { url: this.explicitBase, launchId: await refreshDesktopLaunchId() } : await discoverDesktopCandidate();
+      if (!candidate) { this.invalidateConnection(); return false; }
+      this.base = new URL(candidate.url);
+      this.launchId = candidate.launchId;
+      try {
+        const projects = await this.rawRequest<unknown>('GET', '/api/projects');
+        const projectRecord = asRecord(projects);
+        if (!projectRecord || !Array.isArray(projectRecord.projects)) throw new Error('invalid /api/projects response');
+        let writable = false;
+        if (this.launchId) {
+          try {
+            const health = await this.rawRequest<unknown>('GET', '/healthz');
+            writable = asRecord(health)?.ok === true;
+          } catch { writable = false; }
+        }
+        this.events.start();
+        this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] };
+        this.capsAt = Date.now();
+        return writable;
+      } catch { this.invalidateConnection(); return false; }
+    })().finally(() => { this.refreshing = undefined; });
+    return this.refreshing;
+  }
+  async capabilities(): Promise<Capabilities> {
+    if (this.caps && Date.now() - this.capsAt < 4000) return this.caps;
+    await this.refreshDesktopConnection();
+    if (this.caps) return this.caps;
+    this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop or CLI was selected or its authorization could not be verified. Readiness metadata, process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL were checked; use install or doctor for setup details.'] };
+    this.capsAt = Date.now();
+    return this.caps;
+  }
   async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }
   async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=asRecord(p.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; return threads.flatMap((value)=>{const t=asRecord(value); const id=asString(t?.id); if(!id)return []; return [{id,projectId:p.id,title:asString(t?.title),state:asString(t?.turnState),model:asString(t?.model),metadata:redact(t as Record<string, Json>) as Json}];});}); }
   async getThread(id:string):Promise<ThreadDetail>{const value=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(value.messages)?sanitizeFreebuff(value.messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,live:this.progress.read(threadId),metadata:redact(value as Record<string, Json>) as Json};}
@@ -198,7 +269,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{await this.capabilities(); return this.progress.active().map(id => this.progress.read(id, 0, 1));}
   async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
   async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);const stat=await fs.stat(file);if(stat.size>1_000_000)throw new Error('Project file exceeds the 1 MB safety limit');return {path:relative,content:await fs.readFile(file,'utf8')};}
-  private async assertWritable(): Promise<void> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff Desktop writes are unavailable: no verified launch authorization contract'); }
+  private async assertWritable(): Promise<void> { const writable = await this.refreshDesktopConnection(); const caps = await this.capabilities(); if (!writable || !this.launchId || caps.readOnly) throw new Error('Freebuff Desktop writes are unavailable: no verified launch authorization contract'); }
   async sendMessage(id:string,text:string){await this.assertWritable();if(!text||text.length>100000)throw new Error('Message must be 1 to 100000 characters');return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/message`,{text})) as Json;}
   async stop(id:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/stop`,{})) as Json;}
   async resume(id:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/resume`,{})) as Json;}
