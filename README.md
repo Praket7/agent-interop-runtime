@@ -111,6 +111,14 @@ The HTTP transport keeps MCP sessions in memory between requests. It requires a 
 
 Run `agent-interop-runtime install --write` repeatedly when needed. The installer replaces only the Agent Interop configuration section and leaves unrelated configuration intact.
 
+## Shared conversations
+
+The runtime includes a local conversation coordinator. Create a conversation and attach exact native sessions with `conversation_create` and `conversation_join`. Use `conversation_send` for directed delivery and `conversation_read` for the durable transcript.
+
+Each provider keeps its own native session and context. The coordinator records sender recipient reply links and delivery receipts. A queued or accepted receipt proves transport delivery only. The destination agent must produce a reply and that reply must be sent back explicitly. This preserves control and prevents recursive agent loops.
+
+Freebuff Desktop writes use the local `/api/thread/<id>/message` route with the current `x-freebuff-launch-id` header. The runtime discovers readiness metadata and local process data then retries authorization when Desktop rotates its launch ID. If the ID cannot be verified the runtime stays read only.
+
 ## Design
 
 The runtime uses a small common contract for sessions, operations, events, diffs, permissions, and model controls. The common layer is intentionally narrower than any provider. Native identifiers and provenance stay attached to every normalized session and evidence record.

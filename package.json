@@ -26,8 +26,7 @@
   },
   "type": "module",
   "bin": {
-    "agent-interop-runtime": "dist/src/cli.js",
-    "freebuff-mcp": "dist/src/cli.js"
+    "agent-interop-runtime": "dist/src/cli.js"
   },
   "files": [
     "dist/src",

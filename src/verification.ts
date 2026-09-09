@@ -103,23 +103,26 @@ function runProcess(executable: string, args: readonly string[], options: { cwd:
     const stdout = boundedCollector(options.maxOutputBytes);
     const stderr = boundedCollector(options.maxOutputBytes);
     let settled = false;
+    let exited = false;
     let timedOut = false;
     const child = spawn(executable, [...args], { cwd: options.cwd, env: { ...process.env, ...options.env }, shell: false, windowsHide: true });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
-      setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 250);
+      setTimeout(() => { if (!exited) child.kill('SIGKILL'); }, 250);
     }, options.timeoutMs);
     child.stdout?.on('data', (chunk: Buffer | string) => stdout.append(chunk));
     child.stderr?.on('data', (chunk: Buffer | string) => stderr.append(chunk));
     child.on('error', (error) => {
       if (settled) return;
+      exited = true;
       settled = true;
       clearTimeout(timer);
       resolveResult({ stdout: stdout.value(), stderr: stderr.value(), stdoutTruncated: stdout.truncated(), stderrTruncated: stderr.truncated(), exitCode: null, signal: null, timedOut, error: error.message });
     });
     child.on('close', (exitCode, signal) => {
       if (settled) return;
+      exited = true;
       settled = true;
       clearTimeout(timer);
       resolveResult({ stdout: stdout.value(), stderr: stderr.value(), stdoutTruncated: stdout.truncated(), stderrTruncated: stderr.truncated(), exitCode, signal, timedOut });
@@ -207,10 +210,14 @@ export async function verify(options: VerificationOptions = {}): Promise<Verific
   return { commands: results, git: options.git === false ? null : await collectGitEvidence(cwd) };
 }
 
-export async function repositoryDiff(cwd: string): Promise<{ cwd: string; diff: string; status: string; trust: 'repository_verified' }> {
+export async function repositoryDiff(cwd: string): Promise<{ cwd: string; diff: string; status: string; trust: 'repository_verified'; untracked: string[]; commit: string; repoRoot: string }> {
   const root = resolve(cwd);
-  const [diff, status] = await Promise.all([runGit(['diff', '--no-ext-diff', '--binary'], root), runGit(['status', '--short'], root)]);
-  return { cwd: root, diff: diff.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), status: status.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), trust: 'repository_verified' };
+  const rootResult = await runGit(['rev-parse', '--show-toplevel'], root);
+  if (rootResult.exitCode !== 0 || !rootResult.stdout.trim()) throw new Error(`No Git repository found for ${root}`);
+  const repoRoot = resolve(rootResult.stdout.trim());
+  const [diff, status, commit, untracked] = await Promise.all([runGit(['diff', 'HEAD', '--no-ext-diff', '--binary'], repoRoot), runGit(['status', '--short'], repoRoot), runGit(['rev-parse', 'HEAD'], repoRoot), runGit(['ls-files', '--others', '--exclude-standard'], repoRoot)]);
+  if (diff.exitCode !== 0 || status.exitCode !== 0 || commit.exitCode !== 0) throw new Error(`Git evidence collection failed: ${diff.stderr || status.stderr || commit.stderr}`);
+  return { cwd: root, repoRoot, commit: commit.stdout.trim(), diff: diff.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), status: status.stdout.slice(0, DEFAULT_MAX_OUTPUT_BYTES), untracked: untracked.stdout.split(/\r?\n/).filter(Boolean), trust: 'repository_verified' };
 }
 
 function parseLegacyCommand(command: string): VerificationCommand {

@@ -16,11 +16,12 @@ import { repositoryDiff } from './verification.js';
 import os from 'node:os';
 import path from 'node:path';
 import { VERSION } from './version.js';
+import { ConversationStore } from './conversations.js';
 const providers = z.enum(['freebuff','opencode','codex','claude-code','cursor']);
 const modelSelection = z.union([z.string().min(1), z.object({providerID:z.string().min(1),modelID:z.string().min(1),variant:z.string().min(1).optional()})]);
 
 export function createInteropRegistry(runtime: Runtime): InteropRegistry { return new InteropRegistry().register(new FreebuffAdapter(runtime)).register(new OpenCodeAdapter()).register(new CodexAdapter()).register(new ClaudeCodeAdapter()).register(new CursorAdapter()); }
-export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:VERSION}); const interop=createInteropRegistry(runtime); const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const ready=workflow.load();
+export function createServer(runtime: Runtime, includeWrites = true): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:VERSION}); const interop=createInteropRegistry(runtime); const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const conversations=new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json')); const ready=Promise.all([workflow.load(), conversations.load()]);
   const withWorkflow = <T>(fn: () => Promise<T>) => ready.then(fn);
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities());
@@ -44,6 +45,8 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   read('evidence_list','List evidence captured by the runtime.',{workId:z.string().optional()},(a)=>withWorkflow(()=>workflow.listEvidence(a.workId)));
   read('work_list','List durable work records.',{},()=>withWorkflow(()=>workflow.listWorks()));
   read('work_get','Read a durable work record and its evidence.',{workId:z.string()},(a)=>withWorkflow(async()=>({work:await workflow.getWork(a.workId),evidence:await workflow.listEvidence(a.workId),handoffs:await workflow.listHandoffs(a.workId),reviews:await workflow.listReviews(a.workId)})));
+  read('conversation_list','List local shared conversations. Native provider sessions remain separate and are referenced as participants.',{},async()=>conversations.list());
+  read('conversation_read','Read the durable shared transcript for one conversation.',{conversationId:z.string(),after:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional()},(a)=>conversations.read(a.conversationId,a.after ?? 0,a.limit ?? 100));
   if (!includeWrites) return s;
   const write=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]}));
   write('send_message','Send a text prompt to an existing Freebuff thread.',{threadId:z.string(),text:z.string().min(1).max(100000)},(a)=>runtime.sendMessage(a.threadId,a.text));
@@ -58,6 +61,9 @@ export function createServer(runtime: Runtime, includeWrites = true): McpServer 
   write('permission_respond','Respond to a provider permission request when supported.',{provider:providers,nativeId:z.string(),requestId:z.string(),decision:z.string()},(a)=>interop.permission(a.provider as ProviderId,a.nativeId,a.requestId,a.decision));
   write('session_set_model','Change the model for an exact native session when supported. OpenCode accepts providerID and modelID.',{provider:providers,nativeId:z.string(),model:modelSelection},(a)=>interop.model(a.provider as ProviderId,a.nativeId,a.model));
   write('session_set_reasoning','Change reasoning effort for an exact native session when supported.',{provider:providers,nativeId:z.string(),effort:z.string()},(a)=>interop.reasoning(a.provider as ProviderId,a.nativeId,a.effort));
+  write('conversation_create','Create a local shared conversation coordinator record.',{title:z.string().min(1).max(300)},(a)=>conversations.create(a.title));
+  write('conversation_join','Attach an exact native provider session to a shared conversation.',{conversationId:z.string(),provider:providers,nativeId:z.string(),workspaceId:z.string().optional(),role:z.enum(['sender','reviewer','editor']).optional()},(a)=>conversations.join(a.conversationId,{provider:a.provider as ProviderId,nativeId:a.nativeId,workspaceId:a.workspaceId,role:a.role}));
+  write('conversation_send','Route one directed message through the local coordinator. The message is persisted before and after delivery, and the receipt distinguishes transport acceptance from completion. Replies require another explicit conversation_send.',{conversationId:z.string(),sender:z.string(),recipient:z.string(),text:z.string().min(1).max(100000),replyTo:z.string().optional(),model:modelSelection.optional(),reasoning:z.string().optional()},(a)=>conversations.send(a.conversationId,a.sender,a.recipient,a.text,interop,{model: a.model && typeof a.model !== 'string' ? a.model : undefined, reasoning:a.reasoning},a.replyTo));
   write('work_create','Create a durable work item with acceptance criteria.',{objective:z.string().min(1),acceptanceCriteria:z.array(z.string()).min(1),sourceSession:z.string().optional(),risks:z.array(z.string()).optional(),unresolvedQuestions:z.array(z.string()).optional()},(a)=>withWorkflow(()=>workflow.createWork(a)));
   write('handoff_create','Create a structured work handoff between exact native sessions.',{workId:z.string(),sourceSession:z.string(),destinationSession:z.string().optional(),objective:z.string(),acceptanceCriteria:z.array(z.string()),evidenceIds:z.array(z.string()),changedFiles:z.array(z.string()),risks:z.array(z.string()),unresolvedQuestions:z.array(z.string()),authorityBoundaries:z.array(z.string())},(a)=>withWorkflow(()=>workflow.createHandoff(a)));
   write('review_create','Record an independent structured review and preserve its provenance.',{workId:z.string(),subjectEvidenceIds:z.array(z.string()),reviewerSessionId:z.string(),independence:z.object({differentSession:z.boolean(),differentProvider:z.boolean(),freshContext:z.boolean(),writeAccess:z.boolean()}),findings:z.array(z.object({id:z.string(),severity:z.enum(['blocking','major','minor','note']),title:z.string(),detail:z.string(),file:z.string().optional(),line:z.number().int().optional()})),verdict:z.enum(['approve','changes_requested','blocked'])},(a)=>withWorkflow(()=>workflow.createReview(a)));
@@ -73,6 +79,7 @@ function authorized(req: IncomingMessage): boolean {
   const a = Buffer.from(supplied); const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
+function validOrigin(req: IncomingMessage): boolean { const origin = req.headers.origin; if (!origin) return true; const allowed = new Set((process.env.FREEBUFF_MCP_ALLOWED_ORIGINS ?? 'http://127.0.0.1,http://localhost').split(',').map((value) => value.trim()).filter(Boolean)); try { return allowed.has(new URL(origin).origin); } catch { return false; } }
 async function body(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -85,10 +92,14 @@ export async function runHttp(): Promise<void> {
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
-  const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport }>();
+  const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport; lastSeen: number }>();
+  const requestCounts = new Map<string, { started: number; count: number }>();
+  const cleanupSessions = setInterval(() => { const cutoff = Date.now() - 30 * 60_000; for (const [id, session] of sessions) if (session.lastSeen < cutoff) { void session.transport.close(); void session.mcp.close(); sessions.delete(id); } }, 60_000); cleanupSessions.unref?.();
   const server = createHttpServer(async (req, res) => {
+    if (!validOrigin(req)) { res.writeHead(403, {'content-type':'application/json'}); res.end(JSON.stringify({error:'invalid_origin'})); return; }
+    const address = req.socket.remoteAddress ?? 'unknown'; const bucket = requestCounts.get(address) ?? { started: Date.now(), count: 0 }; if (Date.now() - bucket.started > 60_000) { bucket.started = Date.now(); bucket.count = 0; } if (++bucket.count > 300) { requestCounts.set(address, bucket); res.writeHead(429, {'content-type':'application/json','retry-after':'60'}); res.end(JSON.stringify({error:'rate_limited'})); return; } requestCounts.set(address, bucket);
     if (req.url === '/healthz' && req.method === 'GET') { if (!isLoopback(host) && !authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; } res.writeHead(200, {'content-type':'application/json'}); res.end(JSON.stringify({ok:true,readOnly:process.env.INTEROP_READ_ONLY === '1'})); return; }
-    if (req.url !== '/mcp' || !['POST', 'DELETE'].includes(req.method ?? '')) { res.writeHead(404, {'content-type':'application/json'}); res.end(JSON.stringify({error:'not_found'})); return; }
+    if (req.url !== '/mcp' || !['POST', 'DELETE'].includes(req.method ?? '')) { res.writeHead(req.url === '/mcp' ? 405 : 404, {'content-type':'application/json'}); res.end(JSON.stringify({error:req.url === '/mcp' ? 'method_not_allowed' : 'not_found'})); return; }
     if (!authorized(req)) { res.writeHead(401, {'www-authenticate':'Bearer'}); res.end(JSON.stringify({error:'unauthorized'})); return; }
     try {
       const sessionId = req.headers['mcp-session-id'];
@@ -100,17 +111,17 @@ export async function runHttp(): Promise<void> {
         const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1');
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessionclosed: (closedId) => { sessions.delete(closedId); } });
         await mcp.connect(transport);
-        session = { mcp, transport };
+        session = { mcp, transport, lastSeen: Date.now() };
         await transport.handleRequest(req, res, parsed);
         if (transport.sessionId) sessions.set(transport.sessionId, session);
         return;
       }
-      await session.transport.handleRequest(req, res, parsed);
+      session.lastSeen = Date.now(); await session.transport.handleRequest(req, res, parsed);
     } catch (error) {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
     }
   });
-  const cleanup=()=>runtime.dispose?.(); server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
+  const cleanup=()=>{ clearInterval(cleanupSessions); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
 }

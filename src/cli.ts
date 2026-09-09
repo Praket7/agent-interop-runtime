@@ -10,27 +10,29 @@ import { VERSION } from './version.js';
 const command=process.argv[2] ?? 'serve';
 function mergeConfig(existing: string, config: string): string {
   const lines = existing.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^\[mcp_servers\.agent_interop(?:\.[^\]]+)?\]\s*$/.test(line.trim()));
+  const header = /^\s*\[[^\]]+\]\s*(?:#.*)?$/;
+  const start = lines.findIndex((line) => /^\s*\[mcp_servers\.agent_interop(?:\.[^\]]+)?\]\s*(?:#.*)?$/.test(line));
   if (start < 0) return `${existing && !existing.endsWith('\n') ? `${existing}\n` : existing}${config}`;
   let end = start + 1;
-  while (end < lines.length && !/^\[[^\]]+\]\s*$/.test((lines[end] ?? '').trim())) end++;
+  while (end < lines.length && !header.test(lines[end] ?? '')) end++;
   return [...lines.slice(0, start), config.trim(), ...lines.slice(end)].join('\n').replace(/\n{3,}/g, '\n\n');
 }
+async function atomicWrite(file: string, content: string): Promise<void> { const temp = `${file}.${process.pid}.tmp`; await fs.writeFile(temp, content, { encoding: 'utf8', mode: 0o600 }); await fs.rename(temp, file); }
 async function installConfig(write: boolean): Promise<void> {
   const launcher = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const config = `[mcp_servers.agent_interop]\ncommand = '${launcher}'\nargs = ['-y', 'agent-interop-runtime@latest', 'serve']\nenabled = true\n\n# Optional safe read-only entry for analysis sessions:\n# [mcp_servers.agent_interop_readonly]\n# command = '${launcher}'\n# args = ['-y', 'agent-interop-runtime@latest', 'serve']\n# enabled = true\n# [mcp_servers.agent_interop_readonly.env]\n# INTEROP_READ_ONLY = '1'\n\n# Optional trusted local verification authorization:\n# [mcp_servers.agent_interop.env]\n# INTEROP_ALLOW_VERIFICATION = '1'\n`;
-  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
-  if (write) { let existing = ''; try { existing = await fs.readFile(configPath, 'utf8'); } catch { /* create below */ } await fs.mkdir(path.dirname(configPath), { recursive:true }); await fs.writeFile(configPath, mergeConfig(existing, config), 'utf8'); console.log(`Installed or repaired Agent Interop configuration in ${configPath}`); } else { console.log(config); console.log(`Run 'agent-interop-runtime install --write' to add or repair it in ${configPath}, then restart the local MCP client.`); }
+  const config = `[mcp_servers.agent_interop]\ncommand = '${launcher}'\nargs = ['-y', 'agent-interop-runtime@${VERSION}', 'serve']\nenabled = true\n\n# Optional safe read-only entry for analysis sessions:\n# [mcp_servers.agent_interop_readonly]\n# command = '${launcher}'\n# args = ['-y', 'agent-interop-runtime@${VERSION}', 'serve']\n# enabled = true\n# [mcp_servers.agent_interop_readonly.env]\n# INTEROP_READ_ONLY = '1'\n\n# Optional trusted local verification authorization:\n# [mcp_servers.agent_interop.env]\n# INTEROP_ALLOW_VERIFICATION = '1'\n`;
+  const configPath = path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), 'config.toml');
+  if (write) { let existing = ''; try { existing = await fs.readFile(configPath, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } await fs.mkdir(path.dirname(configPath), { recursive:true }); if (existing && !(await fs.stat(`${configPath}.bak`).catch(() => null))) await fs.copyFile(configPath, `${configPath}.bak`); await atomicWrite(configPath, mergeConfig(existing, config)); console.log(`Installed or repaired Agent Interop configuration in ${configPath}`); } else { console.log(config); console.log(`Run 'agent-interop-runtime install --write' to add or repair it in ${configPath}, then restart the local MCP client.`); }
 }
 async function installCursor(write: boolean, project: boolean, readOnly: boolean): Promise<void> {
   const launcher = process.platform === 'win32' ? 'npx.cmd' : 'npx';
   const configPath = project ? path.join(process.cwd(), '.cursor', 'mcp.json') : path.join(os.homedir(), '.cursor', 'mcp.json');
   let current: Record<string, unknown> = {};
-  try { current = JSON.parse(await fs.readFile(configPath, 'utf8')) as Record<string, unknown>; } catch { /* create a new Cursor configuration */ }
+  try { current = JSON.parse(await fs.readFile(configPath, 'utf8')) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cursor configuration is not valid JSON and was left unchanged: ${error instanceof Error ? error.message : String(error)}`); }
   const servers = current.mcpServers && typeof current.mcpServers === 'object' && !Array.isArray(current.mcpServers) ? current.mcpServers as Record<string, unknown> : {};
   servers.agentInterop = { command: launcher, args: ['-y', 'agent-interop-runtime@latest', 'serve'], ...(readOnly ? { env: { INTEROP_READ_ONLY: '1' } } : {}) };
   const next = JSON.stringify({ ...current, mcpServers: servers }, null, 2) + '\n';
-  if (write) { await fs.mkdir(path.dirname(configPath), { recursive: true }); await fs.writeFile(configPath, next, 'utf8'); console.log(`Installed Agent Interop in ${configPath}`); } else { console.log(next); console.log(`Run agent-interop-runtime cursor-setup --write to update ${configPath}`); }
+  if (write) { await fs.mkdir(path.dirname(configPath), { recursive: true }); if (await fs.stat(configPath).catch(() => null) && !(await fs.stat(`${configPath}.bak`).catch(() => null))) await fs.copyFile(configPath, `${configPath}.bak`); await atomicWrite(configPath, next); console.log(`Installed Agent Interop in ${configPath}`); } else { console.log(next); console.log(`Run agent-interop-runtime cursor-setup --write to update ${configPath}`); }
 }
 if(command==='install'||command==='setup'){await installConfig(process.argv.includes('--write'));}
 else if(command==='cursor-setup'){await installCursor(process.argv.includes('--write'), process.argv.includes('--project'), process.argv.includes('--read-only'));}
