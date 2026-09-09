@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter, CursorAdapter, type RpcRequest } from '../src/adapters.js';
+import { FreebuffAdapter } from '../src/freebuff-adapter.js';
 
 function mockRpc(responses: Record<string, unknown>) {
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -27,10 +28,11 @@ test('Codex App Server adapter initializes and maps native thread operations', a
   assert.deepEqual((await adapter.listSessions()).map((s) => s.nativeId), ['thread-1']);
   const session = await adapter.createSession({ cwd: 'C:/repo', title: 'New work' });
   assert.equal(session.nativeId, 'thread-2');
-  assert.equal((await adapter.send('thread-2', 'hello')).accepted, true);
+  assert.equal((await adapter.send('thread-2', 'hello', { model: { providerID: 'openai', modelID: 'gpt-5.6' }, reasoning: 'high' })).accepted, true);
   assert.equal((await adapter.cancel('thread-2')).accepted, true);
   assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'thread/list', 'thread/start', 'turn/start', 'turn/interrupt']);
   assert.deepEqual(mock.calls[2]?.params, { cwd: 'C:/repo', name: 'New work' });
+  assert.deepEqual(mock.calls[3]?.params, { threadId: 'thread-2', input: [{ type: 'text', text: 'hello' }], model: 'gpt-5.6', effort: 'high' });
 });
 
 test('Claude ACP adapter uses session/new prompt and cancel', async () => {
@@ -87,6 +89,15 @@ test('Cursor ACP authenticates through cursor_login and keeps mode separate from
   assert.deepEqual(mock.calls[3]?.params, { sessionId: 'cursor-1', configId: 'mode', type: 'id', value: 'plan' });
 });
 
+test('Freebuff unified sends apply model and reasoning to the exact native session', async () => {
+  const calls: string[] = [];
+  const runtime = { capabilities: async () => ({ product: 'cli', signedIn: 'unknown', orchestrator: false, readOnly: false, endpoints: ['managed PTY'], notes: [] }), sendMessage: async (id: string, text: string) => { calls.push(`send:${id}:${text}`); return { id, text }; }, setModel: async (id: string, model: string) => { calls.push(`model:${id}:${model}`); return { id, model }; }, setReasoning: async (id: string, effort: string) => { calls.push(`reasoning:${id}:${effort}`); return { id, effort }; } } as any;
+  const adapter = new FreebuffAdapter(runtime);
+  const receipt = await adapter.send('chat-1', 'inspect files', { model: { providerID: 'freebuff', modelID: 'sonnet' }, reasoning: 'high' });
+  assert.equal(receipt.accepted, true);
+  assert.deepEqual(calls, ['model:chat-1:sonnet', 'reasoning:chat-1:high', 'send:chat-1:inspect files']);
+});
+
 test('native adapters degrade honestly when their process cannot be started', async () => {
   const adapter = new CodexAdapter({ command: 'definitely-not-a-real-codex-command' });
   const caps = await adapter.capabilities();
@@ -108,8 +119,16 @@ test('OpenCode accepts a 204 prompt response without parsing JSON', async () => 
     assert.equal(receipt.accepted, true);
     assert.equal(receipt.status, 'queued');
     const sent = JSON.parse(String(requests[0]?.init?.body));
-    assert.deepEqual(sent, { model: { providerID: 'opencode', id: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
+    assert.deepEqual(sent, { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
   } finally { globalThis.fetch = previousFetch; }
+});
+
+test('OpenCode retries the alternate model identity for older or newer API shapes', async () => {
+  const previousFetch = globalThis.fetch;
+  const bodies: unknown[] = [];
+  globalThis.fetch = async (_input, init) => { bodies.push(JSON.parse(String(init?.body))); return bodies.length === 1 ? new Response(JSON.stringify({ message: 'expected id' }), { status: 400 }) : new Response(null, { status: 204 }); };
+  try { const receipt = await new OpenCodeAdapter().send('session-1', 'hello', { model: { providerID: 'opencode', modelID: 'big-pickle' } }); assert.equal(receipt.accepted, true); assert.deepEqual(bodies, [{ model: { providerID: 'opencode', modelID: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] }, { model: { providerID: 'opencode', id: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] }]); }
+  finally { globalThis.fetch = previousFetch; }
 });
 
 test('OpenCode rejects malformed session discovery instead of treating it as empty', async () => {

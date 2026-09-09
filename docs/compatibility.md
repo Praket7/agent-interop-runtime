@@ -5,7 +5,7 @@
 | Freebuff Desktop | Working | Resume working | Working after launch verification | Working through SSE | Not exposed by current bridge | Read only without launch authorization |
 | Freebuff CLI | Working | Managed PTY | Working for bridge owned sessions | PTY progress | Repository fallback | Uses the preserved Freebuff runtime |
 | OpenCode | Working when server is reachable | Working | Working through HTTP | Working through event stream | Working | Set `OPENCODE_SERVER_URL` for a non default port |
-| Codex App Server | Working when `codex app-server` responds | Working through thread start and resume | Working through turn start and interrupt | Live JSON RPC notifications | Not standardized | Native model and permission operations remain provider dependent |
+| Codex App Server | Working when `codex app-server` responds | Working through thread start and resume | Working through turn start and interrupt | Live JSON RPC notifications | Not standardized | Model and reasoning can be selected per turn through `turn/start` |
 | Claude ACP | Working when the configured ACP command is available | Working through session new and load | Working through session prompt and cancel | Live JSON RPC notifications | Not standardized | Authentication and provider command remain user environment dependent |
 | Cursor | Working when `agent acp` is available | Working through ACP session new and load when advertised | Working through ACP session prompt and cancel | Live JSON RPC notifications | Not standardized | Cursor authentication and model controls remain provider negotiated |
 

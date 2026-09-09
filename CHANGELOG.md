@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.8
+
+Freebuff CLI control now requires a successful PTY startup probe. The managed CLI reports queued and running progress, preserves exact conversation identifiers for model and reasoning commands, and forwards unified send controls instead of silently ignoring them.
+
+The runtime pins the node pty beta release containing the macOS spawn helper permission fix and reports the actual PTY version in diagnostics.
+
+OpenCode model requests use modelID first and retry the compatible id shape only for a model related HTTP 400. Provider error responses are returned with bounded redacted diagnostics. OpenCode reasoning maps to the active model variant.
+
 ## 0.2.7
 
 Cursor Agent Client Protocol support is now available through the Cursor agent executable. The runtime can install a safe read only Cursor MCP entry globally or in the current project, authenticate when Cursor requests it, create and resume sessions, send prompts, cancel work, and pass model and mode selections when the session advertises those controls.

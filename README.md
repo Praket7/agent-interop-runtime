@@ -67,7 +67,7 @@ For a storage or repository analysis, enable the read only entry with `INTEROP_R
 
 For trusted Codex work sessions that should run repository checks, also add `INTEROP_ALLOW_VERIFICATION = '1'`. Verification remains disabled by default because it launches local commands.
 
-OpenCode uses its local server at `http://127.0.0.1:4096` by default. Start it with `opencode serve --hostname 127.0.0.1 --port 4096` or set `OPENCODE_SERVER_URL` when its port is different. Remote OpenCode servers require `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`. OpenCode model values use `{ providerID, modelID }`. The `agent` field selects an OpenCode agent. It is not a reasoning setting.
+OpenCode uses its local server at `http://127.0.0.1:4096` by default. Start it with `opencode serve --hostname 127.0.0.1 --port 4096` or set `OPENCODE_SERVER_URL` when its port is different. Remote OpenCode servers require `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`. OpenCode model values use `{ providerID, modelID }`. The `agent` field selects an OpenCode agent. Reasoning is mapped to the selected model variant when the provider supports it.
 
 ## MCP surface
 
@@ -75,7 +75,7 @@ Read tools include `list_agents`, `list_agent_sessions`, `get_work_graph`, `get_
 
 Write tools include `agent_send` and `agent_cancel` when the runtime is not globally read only and the selected provider reports support. OpenCode reports a successful prompt as queued after the HTTP server accepts it. Completion must be observed through events or a later session read. `agent_send` keeps model, agent, and reasoning as separate fields.
 
-Set `FREEBUFF_MCP_CLI_MODE=pty` to force Freebuff CLI mode. This selection happens before Desktop discovery and cannot be overridden by stale or read only Desktop readiness data. The CLI path may be supplied with `FREEBUFF_CLI_PATH`. Run `pnpm pty:probe` to diagnose node-pty startup independently from Freebuff authentication.
+Set `FREEBUFF_MCP_CLI_MODE=pty` to force Freebuff CLI mode. This selection happens before Desktop discovery and cannot be overridden by stale or read only Desktop readiness data. The CLI path may be supplied with `FREEBUFF_CLI_PATH`. The package uses the node pty release with the macOS helper permission fix. Run `pnpm pty:probe` to diagnose node pty startup independently from Freebuff authentication. CLI mutation tools remain unavailable until this probe succeeds.
 
 Claude Code uses the ACP executable configured by `CLAUDE_ACP_COMMAND` or `claude-code-acp`. It can create sessions, load or resume provider owned sessions, send prompts, cancel work, and apply model or thought level selections when ACP advertises the corresponding configuration options. The working directory is sent as the ACP session root so Claude can use its own file tools within the same conversation.
 

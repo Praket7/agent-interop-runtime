@@ -18,4 +18,5 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm pty:probe
       - run: pnpm pack --pack-destination work
