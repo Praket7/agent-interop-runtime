@@ -6,6 +6,8 @@ This release refreshes Freebuff Desktop launch authorization after rejected requ
 
 Freebuff CLI startup now strips terminal control sequences and accepts current full screen readiness markers, with an explicit `FREEBUFF_CLI_READY_PATTERN` escape hatch for future CLI changes.
 
+The native PTY dependency is now `1.2.0-beta.15`. CI covers Ubuntu macOS and Windows with Node 20 22 24 and 26. The README now separates verified runtime behavior from provider installation and authentication requirements.
+
 ## 0.2.8
 
 Freebuff CLI control now requires a successful PTY startup probe. The managed CLI reports queued and running progress, preserves exact conversation identifiers for model and reasoning commands, and forwards unified send controls instead of silently ignoring them.

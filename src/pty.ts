@@ -7,21 +7,22 @@ import type { ThreadProgressEvent, ThreadProgressSnapshot } from './types.js';
 
 export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; progress: ThreadProgressSnapshot; }
 export interface PtyDiagnostics { ok: boolean; node: string; platform: string; nodePty: string; error?: string; }
+const NODE_PTY_VERSION = '1.2.0-beta.15';
 
 export async function probePty(): Promise<PtyDiagnostics> {
   const command = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/echo';
   const args = process.platform === 'win32' ? ['/d', '/c', 'echo pty-probe'] : ['pty-probe'];
   try {
     const term = pty.spawn(command, args, { name: 'xterm-256color', cols: 80, rows: 24, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
-    const result = await new Promise<PtyDiagnostics>((resolve) => { let output = ''; const timer = setTimeout(() => { try { term.kill(); } catch {} resolve({ ok: false, node: process.version, platform: process.platform, nodePty: '1.2.0-beta.14', error: 'PTY probe timed out' }); }, 1500); term.onData((data) => { output += data; }); term.onExit(({ exitCode }) => { clearTimeout(timer); resolve(exitCode === 0 ? { ok: true, node: process.version, platform: process.platform, nodePty: '1.2.0-beta.14' } : { ok: false, node: process.version, platform: process.platform, nodePty: '1.2.0-beta.14', error: `probe exited with code ${exitCode}; output ${output.slice(-200)}` }); }); });
+    const result = await new Promise<PtyDiagnostics>((resolve) => { let output = ''; const timer = setTimeout(() => { try { term.kill(); } catch {} resolve({ ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: 'PTY probe timed out' }); }, 1500); term.onData((data) => { output += data; }); term.onExit(({ exitCode }) => { clearTimeout(timer); resolve(exitCode === 0 ? { ok: true, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION } : { ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: `probe exited with code ${exitCode}; output ${output.slice(-200)}` }); }); });
     return result;
-  } catch (error) { return { ok: false, node: process.version, platform: process.platform, nodePty: '1.2.0-beta.14', error: error instanceof Error ? error.message : String(error) }; }
+  } catch (error) { return { ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: error instanceof Error ? error.message : String(error) }; }
 }
 
 function cliCandidates(): string[] {
   const home = os.homedir();
   const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).flatMap((entry) => [path.join(entry, process.platform === 'win32' ? 'freebuff.exe' : 'freebuff'), path.join(entry, 'freebuff')]);
-  return [process.env.FREEBUFF_CLI_PATH ?? '', path.join(home, '.config', 'manicode', 'freebuff.exe'), path.join(home, '.config', 'manicode', 'freebuff'), ...pathEntries].filter(Boolean);
+  return [process.env.FREEBUFF_CLI_PATH ?? '', path.join(home, '.config', 'manicode', 'freebuff.exe'), path.join(home, '.config', 'manicode', 'freebuff'), path.join(process.env.APPDATA ?? '', 'manicode', 'freebuff.exe'), path.join(process.env.LOCALAPPDATA ?? '', 'manicode', 'freebuff.exe'), ...pathEntries].filter(Boolean);
 }
 
 export async function findFreebuffCli(): Promise<string | null> {
