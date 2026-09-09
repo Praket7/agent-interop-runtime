@@ -86,7 +86,13 @@ export class OpenCodeAdapter implements AgentAdapter {
   private get remoteWithoutAuth(): boolean { return !isLoopbackHost(this.base.hostname) && !opencodeAuthHeaders().authorization; }
   private async startManagedServer(): Promise<URL | undefined> {
     if (process.env.OPENCODE_AUTO_START === 'false' || !isLoopbackHost(this.base.hostname)) return undefined;
-    if (this.managedServerStart && this.managedServer?.exitCode === null) return this.managedServerStart;
+    if (this.managedServerStart && this.managedServer?.exitCode === null) {
+      const existing = await this.managedServerStart;
+      if (existing) {
+        try { const response = await fetch(new URL('/global/health', existing), { headers: opencodeAuthHeaders(), signal: AbortSignal.timeout(500) }); if (response.ok) return existing; } catch { /* restart below */ }
+      }
+      this.managedServer?.kill();
+    }
     this.managedServerStart = undefined;
     this.managedServerStart = (async () => {
       try {
