@@ -46,6 +46,13 @@ export async function findLatestCliConversationId(cwd: string, minimumMtimeMs = 
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return candidates[0]?.id ?? null;
 }
+function visibleTerminalText(value: string): string { return value.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ''); }
+function cliReady(output: string): boolean {
+  const visible = visibleTerminalText(output);
+  const configured = process.env.FREEBUFF_CLI_READY_PATTERN;
+  if (configured) { try { return new RegExp(configured, 'i').test(visible); } catch { /* fall back to safe built in markers */ } }
+  return /Enter a coding task|coding task|Freebuff|manicode|press .* to (send|submit)|[❯>]\s*$/im.test(visible);
+}
 
 export class CliPtyManager {
   private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number; events: ThreadProgressEvent[]; sequence: number; state: ThreadProgressEvent['state'] }>();
@@ -68,16 +75,16 @@ export class CliPtyManager {
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); if (/error|failed|not authenticated/i.test(data)) { state.state = 'failed'; this.progress(safeId, 'failed', data.slice(-500), data.slice(-500)); } else if (/completed|finished|done/i.test(data)) { state.state = 'completed'; this.progress(safeId, 'completed', data.slice(-500)); } });
     term.onExit(({ exitCode }) => { state.exited = true; state.exitCode = exitCode; if (exitCode !== 0) { state.state = 'failed'; this.progress(safeId, 'failed', undefined, `Freebuff CLI exited with code ${exitCode}`); } });
     const deadline = Date.now() + 12_000;
-    while (Date.now() < deadline && !/Enter a coding task or \/ for commands/i.test(state.output) && !/Not authenticated|Press ENTER to login/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    while (Date.now() < deadline && !cliReady(state.output) && !/Not authenticated|Press ENTER to login/i.test(visibleTerminalText(state.output))) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     if (/Freebuff is already running/i.test(state.output) && process.env.FREEBUFF_CLI_TAKEOVER === '1') {
       term.write('\r');
       const takeoverDeadline = Date.now() + 8_000;
-      while (Date.now() < takeoverDeadline && !/Enter a coding task or \/ for commands/i.test(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      while (Date.now() < takeoverDeadline && !cliReady(state.output)) await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
-    if (/Freebuff is already running/i.test(state.output) && !/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
-    if (/Not authenticated|Press ENTER to login/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
+    if (/Freebuff is already running/i.test(visibleTerminalText(state.output)) && !cliReady(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_ALREADY_RUNNING'); }
+    if (/Not authenticated|Press ENTER to login/i.test(visibleTerminalText(state.output))) { term.kill(); this.sessions.delete(safeId); throw new Error('FREEBUFF_CLI_NOT_AUTHENTICATED'); }
     if (state.exited) { this.sessions.delete(safeId); throw new Error(`FREEBUFF_CLI_EXITED: exit code ${state.exitCode ?? 'unknown'}`); }
-    if (!/Enter a coding task or \/ for commands/i.test(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error(`FREEBUFF_CLI_STARTUP_TIMEOUT: interactive prompt was not detected. Output: ${state.output.slice(-500)}`); }
+    if (!cliReady(state.output)) { term.kill(); this.sessions.delete(safeId); throw new Error(`FREEBUFF_CLI_STARTUP_TIMEOUT: no machine readable readiness marker was detected. Set FREEBUFF_CLI_READY_PATTERN if this CLI exposes a custom marker. Output: ${visibleTerminalText(state.output).slice(-500)}`); }
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
     return this.snapshotState(safeId);
   }

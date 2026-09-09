@@ -71,11 +71,36 @@ function desktopReadinessCandidates(): string[] {
     path.join(process.env.APPDATA ?? '', 'Freebuff', 'readiness.json'),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator.json'),
     path.join(home, 'Library', 'Application Support', 'Freebuff', 'readiness.json'),
+    path.join(home, 'Library', 'Application Support', 'Freebuff', 'launch.json'),
+    path.join(home, 'Library', 'Application Support', 'Freebuff', 'orchestrator-readiness.json'),
+    path.join(home, 'Library', 'Preferences', 'com.freebuff.desktop.json'),
+    path.join(home, '.config', 'freebuff', 'orchestrator.json'),
+    path.join(home, '.config', 'freebuff', 'readiness.json'),
+    path.join(home, '.config', 'manicode', 'orchestrator.json'),
+    path.join(home, '.config', 'manicode', 'readiness.json'),
+    path.join(home, 'Library', 'Application Support', 'Manicode', 'orchestrator.json'),
+    path.join(home, 'Library', 'Application Support', 'Manicode', 'readiness.json'),
     path.join(home, '.config', 'Freebuff', 'orchestrator.json'),
     path.join(home, '.config', 'Freebuff', 'readiness.json'),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
 type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
+function launchIdFrom(value: Record<string, unknown> | null): string | undefined {
+  if (!value) return undefined;
+  for (const key of ['launchId', 'launchID', 'launch_id', 'launch-id', 'freebuffLaunchId', 'authorizationToken', 'authToken', 'token']) {
+    const found = asString(value[key]);
+    if (found && found.length <= 512) return found;
+  }
+  for (const key of ['orchestrator', 'authorization', 'auth', 'readiness']) {
+    const found = launchIdFrom(asRecord(value[key]));
+    if (found) return found;
+  }
+  return undefined;
+}
+function launchIdFromText(text: string): string | undefined {
+  const match = text.match(/(?:x-freebuff-launch-id|freebuff[-_ ]launch[-_ ]id|launchId|launch_id|authorizationToken|authToken)\s*[:=]\s*["']?([A-Za-z0-9._~+/=-]{8,512})/i);
+  return match?.[1];
+}
 async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const candidates: DesktopCandidate[] = [];
   for (const file of desktopReadinessCandidates()) {
@@ -83,7 +108,7 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
       const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
       const url = asString(value?.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
-      const launchId = asString(value?.launchId) ?? asString(value?.['launch-id']) ?? asString(value?.launch_id);
+      const launchId = launchIdFrom(value);
       const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
       const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
       const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
@@ -102,6 +127,8 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
     try {
       const text = await fs.readFile(log, 'utf8');
       for (const match of text.matchAll(/(?:https?:\/\/)?127\.0\.0\.1:(\d+)/g)) urls.add(`http://127.0.0.1:${match[1]}`);
+      const launchId = launchIdFromText(text);
+      if (launchId) for (const candidate of candidates) if (!candidate.launchId) candidate.launchId = launchId;
     } catch { /* try the next platform-specific location */ }
   }
   try {
@@ -113,22 +140,51 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const listeners: DesktopCandidate[] = [...urls].reverse().map((url) => ({ url }));
   return [...candidates, ...listeners].sort((a, b) => (b.freshness ?? 0) - (a.freshness ?? 0));
 }
+async function refreshDesktopLaunchId(): Promise<string | undefined> {
+  if (process.env.FREEBUFF_LAUNCH_ID) return process.env.FREEBUFF_LAUNCH_ID;
+  for (const file of desktopReadinessCandidates()) {
+    const found = launchIdFrom(await readJson(file) as Record<string, unknown> | null);
+    if (found) return found;
+  }
+  for (const log of desktopLogCandidates()) {
+    try { const found = launchIdFromText(await fs.readFile(log, 'utf8')); if (found) return found; } catch { /* optional */ }
+  }
+  try {
+    const processText = process.platform === 'win32'
+      ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"], { timeout: 2500 })).stdout
+      : (await execFileAsync('ps', ['-eww', '-ax'], { timeout: 2500 })).stdout;
+    const found = launchIdFromText(processText);
+    if (found) return found;
+  } catch { /* process inspection is optional and may be restricted */ }
+  return undefined;
+}
 async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
   const seen = new Set<string>();
   for (const candidate of await discoverDesktopCandidates()) {
     if (seen.has(candidate.url)) continue;
     seen.add(candidate.url);
-    try { const headers = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) }; const response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!response.ok) continue; if (candidate.launchId) { const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!health.ok) continue; } return candidate; } catch { /* try the next discovered endpoint */ }
+    try { let headers = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) }; let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!response.ok) continue; if (!candidate.launchId) { candidate.launchId = await refreshDesktopLaunchId(); if (candidate.launchId) { headers = { ...headers, 'x-freebuff-launch-id': candidate.launchId }; response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers }); } } if (candidate.launchId) { const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers }); if (!health.ok) continue; } return candidate; } catch { /* try the next discovered endpoint */ }
   }
   return null;
 }
 
 export class DesktopOrchestratorRuntime implements Runtime {
-  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress);
+  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities; private refreshing?: Promise<string | undefined>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress);
   constructor(base?: string) { this.explicitBase = base; this.base = new URL(base ?? 'http://127.0.0.1'); }
   private async request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
     const c = new AbortController(); const timer = setTimeout(() => c.abort(), 5000);
-    try { const r = await fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(this.launchId ? { 'x-freebuff-launch-id': this.launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); if (!r.ok) throw new Error(`Freebuff returned HTTP ${r.status}`); return await r.json() as T; } finally { clearTimeout(timer); }
+    try {
+      const send = () => fetch(new URL(pathname, this.base), { method, signal: c.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(this.launchId ? { 'x-freebuff-launch-id': this.launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+      let response = await send();
+      if (response.status === 401 || response.status === 403) {
+        this.caps = undefined;
+        this.refreshing ??= refreshDesktopLaunchId().finally(() => { this.refreshing = undefined; });
+        const refreshed = await this.refreshing;
+        if (refreshed && refreshed !== this.launchId) { this.launchId = refreshed; response = await send(); }
+      }
+      if (!response.ok) throw new Error(`Freebuff returned HTTP ${response.status}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`);
+      return await response.json() as T;
+    } finally { clearTimeout(timer); }
   }
   async capabilities(): Promise<Capabilities> { if (this.caps) return this.caps; const candidate = this.explicitBase ? { url:this.explicitBase, launchId:process.env.FREEBUFF_LAUNCH_ID } : await discoverDesktopCandidate(); if (!candidate) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop or CLI was selected. Desktop readiness metadata, process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL were checked; use install or doctor for setup details.'] }; return this.caps; } this.base = new URL(candidate.url); this.launchId = candidate.launchId; try { const projects = await this.request<unknown>('GET','/api/projects'); const record=asRecord(projects); if (!record || !Array.isArray(record.projects)) throw new Error('invalid /api/projects response'); let writable = false; if (this.launchId) { try { const health = await this.request<unknown>('GET','/healthz'); writable = Boolean(asRecord(health)?.ok === true); } catch { writable = false; } } this.events.start(); this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] }; } catch (error) { this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:[`Desktop discovery reached ${candidate.url}, but its response was invalid or unavailable: ${error instanceof Error ? error.message : 'unknown error'}`] }; } return this.caps; }
   async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }

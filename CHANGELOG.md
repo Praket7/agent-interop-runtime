@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9
+
+This release refreshes Freebuff Desktop launch authorization after rejected requests and searches the documented local readiness and log locations for the current launch ID. Desktop writes remain disabled until the live header is accepted.
+
+Freebuff CLI startup now strips terminal control sequences and accepts current full screen readiness markers, with an explicit `FREEBUFF_CLI_READY_PATTERN` escape hatch for future CLI changes.
+
 ## 0.2.8
 
 Freebuff CLI control now requires a successful PTY startup probe. The managed CLI reports queued and running progress, preserves exact conversation identifiers for model and reasoning commands, and forwards unified send controls instead of silently ignoring them.
