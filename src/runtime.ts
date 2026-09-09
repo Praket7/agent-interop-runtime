@@ -147,23 +147,26 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   const listeners: DesktopCandidate[] = [...urls].reverse().map((url) => ({ url }));
   return [...candidates, ...listeners].sort((a, b) => (b.freshness ?? 0) - (a.freshness ?? 0));
 }
-async function refreshDesktopLaunchId(): Promise<string | undefined> {
+async function refreshDesktopLaunchId(rejected?: string): Promise<string | undefined> {
+  let fallback: string | undefined;
   for (const file of desktopReadinessCandidates()) {
     const value = await readJson(file) as Record<string, unknown> | undefined;
     const found = readinessIsFresh(value ?? null) ? launchIdFrom(value ?? null) : undefined;
-    if (found) return found;
+    if (found) { if (!rejected || found !== rejected) return found; fallback = found; }
   }
   for (const log of desktopLogCandidates()) {
-    try { const found = launchIdFromText(await fs.readFile(log, 'utf8')); if (found) return found; } catch { /* optional */ }
+    try { const found = launchIdFromText(await fs.readFile(log, 'utf8')); if (found && (!rejected || found !== rejected)) return found; if (found) fallback = found; } catch { /* optional */ }
   }
   try {
     const processText = process.platform === 'win32'
       ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"], { timeout: 2500 })).stdout
       : (await execFileAsync('ps', ['-eww', '-ax'], { timeout: 2500 })).stdout;
     const found = launchIdFromText(processText);
-    if (found) return found;
+    if (found && (!rejected || found !== rejected)) return found;
+    if (found) fallback = found;
   } catch { /* process inspection is optional and may be restricted */ }
-  return process.env.FREEBUFF_LAUNCH_ID;
+  const configured = process.env.FREEBUFF_LAUNCH_ID;
+  return configured && (!rejected || configured !== rejected) ? configured : fallback;
 }
 async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
   const seen = new Set<string>();
@@ -174,7 +177,7 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
       let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) };
       let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
       if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 404)) {
-        const refreshed = await refreshDesktopLaunchId();
+        const refreshed = await refreshDesktopLaunchId(candidate.launchId);
         if (refreshed && refreshed !== candidate.launchId) {
           candidate.launchId = refreshed;
           headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed };
@@ -201,9 +204,9 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
 }
 
 export class DesktopOrchestratorRuntime implements Runtime {
-  private base: URL; private explicitBase?: string; private launchId?: string; private caps?: Capabilities; private capsAt = 0; private refreshing?: Promise<boolean>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress, () => this.refreshDesktopConnection());
+  private base: URL; private explicitBase?: string; private launchId?: string; private rejectedLaunchId?: string; private caps?: Capabilities; private capsAt = 0; private refreshing?: Promise<boolean>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress, () => this.refreshAfterEventFailure());
   constructor(base?: string) { this.explicitBase = base; this.base = new URL(base ?? 'http://127.0.0.1'); }
-  private invalidateConnection(): void { this.caps = undefined; this.capsAt = 0; this.launchId = undefined; }
+  private invalidateConnection(rejectedLaunchId?: string): void { this.caps = undefined; this.capsAt = 0; if (rejectedLaunchId) this.rejectedLaunchId = rejectedLaunchId; this.launchId = undefined; }
   private async rawRequest<T>(method: string, pathname: string, body?: unknown): Promise<T> {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 5000);
     try {
@@ -219,7 +222,8 @@ export class DesktopOrchestratorRuntime implements Runtime {
     try { return await this.rawRequest<T>(method, pathname, body); }
     catch (error) {
       if (!this.shouldRefresh(error, method)) throw error;
-      this.invalidateConnection();
+      const rejectedLaunchId = this.launchId;
+      this.invalidateConnection(rejectedLaunchId);
       if (!await this.refreshDesktopConnection()) throw error;
       return this.rawRequest<T>(method, pathname, body);
     }
@@ -227,10 +231,11 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async refreshDesktopConnection(): Promise<boolean> {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
-      const candidate = this.explicitBase ? { url: this.explicitBase, launchId: await refreshDesktopLaunchId() } : await discoverDesktopCandidate();
+      const candidate = this.explicitBase ? { url: this.explicitBase, launchId: await refreshDesktopLaunchId(this.rejectedLaunchId) } : await discoverDesktopCandidate();
       if (!candidate) { this.invalidateConnection(); return false; }
       this.base = new URL(candidate.url);
       this.launchId = candidate.launchId;
+      if (candidate.launchId && candidate.launchId !== this.rejectedLaunchId) this.rejectedLaunchId = undefined;
       try {
         const projects = await this.rawRequest<unknown>('GET', '/api/projects');
         const projectRecord = asRecord(projects);
@@ -250,6 +255,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
     })().finally(() => { this.refreshing = undefined; });
     return this.refreshing;
   }
+  private async refreshAfterEventFailure(): Promise<boolean> { const rejectedLaunchId = this.launchId; this.invalidateConnection(rejectedLaunchId); return this.refreshDesktopConnection(); }
   async capabilities(): Promise<Capabilities> {
     if (this.caps && Date.now() - this.capsAt < 4000) return this.caps;
     await this.refreshDesktopConnection();
