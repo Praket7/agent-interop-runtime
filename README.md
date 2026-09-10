@@ -34,7 +34,7 @@ Freebuff support requires one of these local installations.
 
 The other providers have their own requirements.
 
-* OpenCode requires a running local OpenCode server
+* OpenCode requires the OpenCode CLI; the runtime can start and manage a local server automatically
 * Codex requires the Codex app server command
 * Claude Code requires the Claude ACP executable
 * Cursor requires the Cursor agent ACP command
@@ -53,8 +53,8 @@ agent-interop-runtime doctor
 You can also use the package without a global install.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.12 doctor
-pnpm dlx agent-interop-runtime@0.2.12 serve
+pnpm dlx agent-interop-runtime@0.2.18 doctor
+pnpm dlx agent-interop-runtime@0.2.18 serve
 ```
 
 The version is pinned in the examples so a host does not silently change behavior during startup. Update the version deliberately after reviewing a release.
@@ -81,8 +81,8 @@ enabled = true
 The installer can add or repair this entry.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.12 install
-pnpm dlx agent-interop-runtime@0.2.12 install --write
+pnpm dlx agent-interop-runtime@0.2.18 install
+pnpm dlx agent-interop-runtime@0.2.18 install --write
 ```
 
 The write command preserves unrelated Codex configuration, makes one backup, uses an atomic replacement, and refuses malformed existing content. Set `CODEX_HOME` when Codex uses a nonstandard configuration directory.
@@ -160,7 +160,9 @@ Use the doctor command before testing messages.
 agent-interop-runtime doctor
 ```
 
-OpenCode needs its local server.
+OpenCode connects to an existing local server when one is running. If none is reachable, Agent Interop starts `opencode serve` automatically on a free loopback port, waits for `/global/health`, and reuses the managed server. If that server exits or is disconnected, the next request starts a replacement and rediscoveries sessions. Set `OPENCODE_AUTO_START=false` to disable this behavior.
+
+You can still start it manually:
 
 ```text
 opencode serve --hostname 127.0.0.1 --port 4096
@@ -242,4 +244,4 @@ This package does not promise a single native chat transcript across providers. 
 
 ## Project status
 
-The repository is private while compatibility evidence is collected. The package is designed for local use and safe degradation. Freebuff Desktop and CLI are both supported paths when installed and authenticated. The correct test is `doctor`, followed by provider session discovery, followed by a unique nonce message in the selected native session.
+The repository is public and welcomes compatibility reports, provider additions, and reproducible bug reports. The package is designed for local use and safe degradation. Freebuff Desktop and CLI are both supported paths when installed and authenticated. OpenCode Desktop/server discovery, managed server startup, disconnect recovery, session rediscovery, and per-prompt reasoning variants have been exercised locally. The correct test is `doctor`, followed by provider session discovery, followed by a unique nonce message in the selected native session.
