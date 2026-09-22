@@ -1,22 +1,35 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import * as pty from 'node-pty';
+import type { IPty } from 'node-pty';
 import { assertSafeId } from './security.js';
 import type { ThreadProgressEvent, ThreadProgressSnapshot } from './types.js';
 
 export interface CliSessionSnapshot { id: string; conversationId?: string; pid: number; output: string; exited: boolean; exitCode?: number; progress: ThreadProgressSnapshot; }
 export interface PtyDiagnostics { ok: boolean; node: string; platform: string; nodePty: string; error?: string; }
 const NODE_PTY_VERSION = '1.2.0-beta.15';
+type PtyModule = typeof import('node-pty');
+let ptyModulePromise: Promise<PtyModule> | undefined;
+
+async function loadPty(): Promise<PtyModule> {
+  ptyModulePromise ??= import('node-pty');
+  return ptyModulePromise;
+}
+
+function ptyUnavailableMessage(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `node-pty is optional and could not be loaded: ${detail}. Base Agent Interop features remain available; Freebuff CLI PTY mode requires a working node-pty install for this Node/platform combination.`;
+}
 
 export async function probePty(): Promise<PtyDiagnostics> {
   const command = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/echo';
   const args = process.platform === 'win32' ? ['/d', '/c', 'echo pty-probe'] : ['pty-probe'];
   try {
+    const pty = await loadPty();
     const term = pty.spawn(command, args, { name: 'xterm-256color', cols: 80, rows: 24, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
     const result = await new Promise<PtyDiagnostics>((resolve) => { let output = ''; let settled = false; const finish = (value: PtyDiagnostics) => { if (settled) return; settled = true; clearTimeout(timer); try { term.kill(); } catch {} resolve(value); }; const timer = setTimeout(() => finish({ ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: 'PTY probe timed out' }), 1500); term.onData((data) => { output += data; }); term.onExit(({ exitCode }) => { finish(exitCode === 0 ? { ok: true, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION } : { ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: `probe exited with code ${exitCode}; output ${output.slice(-200)}` }); }); });
     return result;
-  } catch (error) { return { ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: error instanceof Error ? error.message : String(error) }; }
+  } catch (error) { return { ok: false, node: process.version, platform: process.platform, nodePty: NODE_PTY_VERSION, error: ptyUnavailableMessage(error) }; }
 }
 
 function cliCandidates(): string[] {
@@ -58,7 +71,7 @@ function cliReady(output: string): boolean {
 }
 
 export class CliPtyManager {
-  private sessions = new Map<string, { term: pty.IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number; events: ThreadProgressEvent[]; sequence: number; state: ThreadProgressEvent['state'] }>();
+  private sessions = new Map<string, { term: IPty; cwd: string; startedAt: number; conversationId?: string; output: string; exited: boolean; exitCode?: number; events: ThreadProgressEvent[]; sequence: number; state: ThreadProgressEvent['state'] }>();
   private writeQueues = new Map<string, Promise<void>>();
   private progress(id: string, state: ThreadProgressEvent['state'], text?: string, error?: string): ThreadProgressSnapshot { const session = this.sessions.get(id); if (!session) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); const event: ThreadProgressEvent = { sequence: ++session.sequence, threadId: id, timestamp: new Date().toISOString(), kind: error ? 'failed' : state === 'completed' ? 'completed' : state === 'running' ? 'turn_state' : 'unknown', state, text, error }; session.events.push(event); if (session.events.length > 200) session.events.shift(); return { threadId: id, currentState: state, events: [...session.events], nextSequence: session.sequence + 1, connected: !session.exited, stale: false, latestEventAt: event.timestamp, phase: state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'running' ? 'unknown' : 'unknown', lastMeaningfulUpdate: event.timestamp, lastError: error }; }
   private snapshotState(id: string) { const session = this.sessions.get(id); if (!session) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); return { id, conversationId: session.conversationId, pid: session.term.pid, output: session.output, exited: session.exited, exitCode: session.exitCode, progress: { threadId: id, currentState: session.state, events: [...session.events], nextSequence: session.sequence + 1, connected: !session.exited, stale: false } }; }
@@ -72,8 +85,10 @@ export class CliPtyManager {
     const args = ['--cwd', cwd];
     if (continueId) args.push('--continue', assertSafeId(continueId));
     const startedAt = Date.now();
-    let term: pty.IPty;
-    try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw new Error(`FREEBUFF_PTY_START_FAILED: ${error instanceof Error ? error.message : String(error)}. Verify node-pty was rebuilt for ${process.version} with 'pnpm rebuild node-pty' and that the CLI is executable.`); }
+    let pty: PtyModule;
+    try { pty = await loadPty(); } catch (error) { throw new Error(`FREEBUFF_PTY_UNAVAILABLE: ${ptyUnavailableMessage(error)}`); }
+    let term: IPty;
+    try { term = pty.spawn(file, args, { name: 'xterm-256color', cols: 160, rows: 48, cwd, ...(process.platform === 'win32' ? { useConpty: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } }); } catch (error) { throw new Error(`FREEBUFF_PTY_START_FAILED: ${error instanceof Error ? error.message : String(error)}. Reinstall or rebuild the optional node-pty dependency for ${process.version} if Freebuff CLI PTY mode is required.`); }
     const state = { term, cwd, startedAt, conversationId: continueId, output: '', exited: false, exitCode: undefined as number | undefined, events: [] as ThreadProgressEvent[], sequence: 0, state: 'queued' as ThreadProgressEvent['state'] };
     this.sessions.set(safeId, state);
     term.onData((data) => { state.output = (state.output + data).slice(-2_000_000); const visible = visibleTerminalText(data); if (/not authenticated|authentication failed|\bfatal\b/i.test(visible)) { state.state = 'failed'; this.progress(safeId, 'failed', visible.slice(-500), visible.slice(-500)); } else if (/\b(?:turn|task|session)\s+(?:completed|finished)\b|state\s*[:=]\s*idle/i.test(visible)) { state.state = 'completed'; this.progress(safeId, 'completed', visible.slice(-500)); } });
@@ -92,22 +107,13 @@ export class CliPtyManager {
     state.conversationId ??= (await findLatestCliConversationId(cwd, startedAt - 1000)) ?? undefined;
     return this.snapshotState(safeId);
   }
-  async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> {
-    if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters');
-    const safeId = assertSafeId(id);
-    // Serialize writes per PTY session: two concurrent prompts cannot interleave keystrokes.
-    const previous = this.writeQueues.get(safeId) ?? Promise.resolve();
-    const result = previous.catch(() => undefined).then(() => this.writePrompt(safeId, text, cwd, continueId));
-    this.writeQueues.set(safeId, result.then(() => undefined, () => undefined));
-    return result;
-  }
+  async send(id: string, text: string, cwd = process.cwd(), continueId?: string): Promise<CliSessionSnapshot> { if (!text || text.length > 100_000) throw new Error('Message must be 1 to 100000 characters'); const safeId = assertSafeId(id); const previous = this.writeQueues.get(safeId) ?? Promise.resolve(); const result = previous.catch(() => undefined).then(() => this.writePrompt(safeId, text, cwd, continueId)); this.writeQueues.set(safeId, result.then(() => undefined, () => undefined)); return result; }
   private async writePrompt(safeId: string, text: string, cwd: string, continueId?: string): Promise<CliSessionSnapshot> {
     const session = await this.start(safeId, cwd, continueId);
     const state = this.sessions.get(safeId);
     if (!state || state.exited) throw new Error('FREEBUFF_CLI_SESSION_EXITED');
     state.state = 'queued'; this.progress(safeId, 'queued');
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
-    // Bracketed paste preserves multiline prompts; the terminal receives the exact text.
     state.term.write('\x15');
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     state.term.write(`\x1b[200~${text}\x1b[201~`);
@@ -119,12 +125,7 @@ export class CliPtyManager {
   }
   async sendToLatest(id: string, text: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, text, cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
   async resumeLatest(id: string, cwd = process.cwd()): Promise<CliSessionSnapshot> { return this.send(id, '/resume', cwd, (await findLatestCliConversationId(cwd)) ?? undefined); }
-  stop(id: string): CliSessionSnapshot {
-    const state = this.sessions.get(assertSafeId(id));
-    if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND');
-    state.term.write('\x1b');
-    return this.snapshotState(assertSafeId(id));
-  }
+  stop(id: string): CliSessionSnapshot { const state = this.sessions.get(assertSafeId(id)); if (!state) throw new Error('FREEBUFF_CLI_SESSION_NOT_FOUND'); state.term.write('\x1b'); return this.snapshotState(assertSafeId(id)); }
   snapshot(id: string): CliSessionSnapshot { return this.snapshotState(assertSafeId(id)); }
   dispose(): void { for (const state of this.sessions.values()) { if (!state.exited) state.term.kill(); } this.sessions.clear(); }
 }
