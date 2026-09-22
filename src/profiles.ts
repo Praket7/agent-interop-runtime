@@ -29,6 +29,7 @@ const COORDINATION_READS = [
   'handoff_packet',
   'conversation_list',
   'conversation_read',
+  'claim_list',
 ] as const;
 
 const INTEROP_WRITES = [
@@ -51,6 +52,8 @@ const COORDINATION_WRITES = [
   'work_verify',
   'review_create',
   'review_request',
+  'claim_acquire',
+  'claim_release',
 ] as const;
 
 const FREEBUFF_READS = [
