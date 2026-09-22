@@ -38,6 +38,19 @@ export interface WorkRecord {
   updatedAt: string;
 }
 
+export interface ResourceClaim {
+  id: string;
+  workId: string;
+  sessionId: string;
+  resource: string;
+  kind: 'file' | 'directory' | 'interface' | 'workspace';
+  mode: 'exclusive' | 'shared_read';
+  status: 'active' | 'released' | 'expired';
+  acquiredAt: string;
+  expiresAt: string;
+  releasedAt?: string;
+}
+
 export interface Handoff {
   id: string;
   workId: string;
@@ -112,6 +125,7 @@ export class WorkflowStore {
   private evidence = new Map<string, Evidence>();
   private handoffs = new Map<string, Handoff>();
   private reviews = new Map<string, Review>();
+  private claims = new Map<string, ResourceClaim>();
   private recovery?: { required: true; file: string; preservedFile?: string; reason: string };
   private loaded = false;
   constructor(private readonly file?: string) {}
@@ -144,11 +158,11 @@ export class WorkflowStore {
     if (!this.file) return;
     try {
       const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Record<string, unknown>;
-      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear();
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
       this.adopt(raw);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear();
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
     }
   }
 
@@ -157,6 +171,7 @@ export class WorkflowStore {
     for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) { const e = item as Evidence; if (e?.id) this.evidence.set(e.id, e); }
     for (const item of Array.isArray(raw.handoffs) ? raw.handoffs : []) { const h = item as Handoff; if (h?.id) this.handoffs.set(h.id, h); }
     for (const item of Array.isArray(raw.reviews) ? raw.reviews : []) { const r = item as Review; if (r?.id) this.reviews.set(r.id, r); }
+    for (const item of Array.isArray(raw.claims) ? raw.claims : []) { const claim = item as ResourceClaim; if (claim?.id) this.claims.set(claim.id, claim); }
   }
 
   private async transact<T>(fn: () => T): Promise<T> {
@@ -167,14 +182,14 @@ export class WorkflowStore {
       // Read current on-disk state inside the lock so parallel writers never lose records (AI-10).
       try { this.adopt(JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const result = fn();
-      const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()] };
+      const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
       await atomicWriteJson(file, value);
       return result;
     });
   }
 
-  private snapshot(): { works: WorkRecord[]; evidence: Evidence[]; handoffs: Handoff[]; reviews: Review[] } {
-    return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()] };
+  private snapshot(): { works: WorkRecord[]; evidence: Evidence[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] } {
+    return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
   }
 
   async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions'>>): Promise<WorkRecord> {
@@ -219,6 +234,45 @@ export class WorkflowStore {
   /** Metadata-only evidence list: contents are addressable by ID, not re-returned in bulk. */
   async listEvidenceSummaries(workId?: string): Promise<EvidenceSummary[]> {
     return (await this.listEvidence(workId)).map(({ data, ...rest }) => ({ ...rest, dataBytes: JSON.stringify(data ?? null).length }));
+  }
+
+  async claimResource(input: { workId: string; sessionId: string; resource: string; kind?: ResourceClaim['kind']; mode?: ResourceClaim['mode']; ttlSeconds?: number }): Promise<ResourceClaim> {
+    return this.transact(() => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      const resource = normalizeResource(input.resource);
+      if (!resource) throw new Error('Resource claim must name a file, directory, interface, or workspace');
+      const kind = input.kind ?? 'file';
+      const mode = input.mode ?? 'exclusive';
+      const nowMs = Date.now();
+      for (const claim of this.claims.values()) if (claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs) claim.status = 'expired';
+      const existing = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.workId === input.workId && claim.sessionId === input.sessionId && claim.kind === kind && claim.mode === mode && claim.resource === resource);
+      if (existing) return existing;
+      if (mode === 'exclusive') {
+        const conflict = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.mode === 'exclusive' && claim.sessionId !== input.sessionId && resourcesOverlap({ resource, kind }, claim));
+        if (conflict) throw new Error(`Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`);
+      }
+      const ttlSeconds = Math.min(3600, Math.max(30, Math.floor(input.ttlSeconds ?? 600)));
+      const acquiredAt = now();
+      const claim: ResourceClaim = { id: id('claim'), workId: input.workId, sessionId: input.sessionId, resource, kind, mode, status: 'active', acquiredAt, expiresAt: new Date(nowMs + ttlSeconds * 1000).toISOString() };
+      this.claims.set(claim.id, claim);
+      return claim;
+    });
+  }
+
+  async releaseClaim(claimId: string, sessionId?: string): Promise<ResourceClaim> {
+    return this.transact(() => {
+      const claim = this.claims.get(claimId);
+      if (!claim) throw new Error(`Unknown claim ${claimId}`);
+      if (sessionId && claim.sessionId !== sessionId) throw new Error(`Claim ${claimId} belongs to ${claim.sessionId}, not ${sessionId}`);
+      if (claim.status === 'active') { claim.status = 'released'; claim.releasedAt = now(); }
+      return claim;
+    });
+  }
+
+  async listClaims(workId?: string, activeOnly = false): Promise<ResourceClaim[]> {
+    await this.refreshForRead();
+    const nowMs = Date.now();
+    return [...this.claims.values()].map((claim) => claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs ? { ...claim, status: 'expired' as const } : claim).filter((claim) => (!workId || claim.workId === workId) && (!activeOnly || claim.status === 'active'));
   }
 
   async createHandoff(input: Omit<Handoff, 'id' | 'createdAt' | 'status' | 'contextTokens' | 'tokenBudget' | 'omittedFields'>): Promise<Handoff> {
@@ -396,13 +450,14 @@ export class WorkflowStore {
     });
   }
 
-  async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[] }> {
+  async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] }> {
     await this.refreshForRead();
     const snap = this.snapshot();
     const edges: WorkGraphSnapshot['edges'] = snap.evidence.filter((e) => e.workId).map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
     for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
     for (const review of snap.reviews) edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
-    return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews };
+    for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'shares_workspace_with' });
+    return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews, claims: snap.claims };
   }
 }
 
@@ -420,4 +475,15 @@ function parseTokenBudget(): number {
   const parsed = raw === undefined ? NaN : Number(raw);
   if (Number.isFinite(parsed) && parsed >= 100) return Math.floor(parsed);
   return 2_000;
+}
+
+function normalizeResource(value: string): string { return value.trim().replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, ''); }
+function resourcesOverlap(a: { resource: string; kind: ResourceClaim['kind'] }, b: { resource: string; kind: ResourceClaim['kind'] }): boolean {
+  const ar = normalizeResource(a.resource); const br = normalizeResource(b.resource);
+  if (a.kind === 'workspace' || b.kind === 'workspace') return ar === br;
+  if (a.kind === 'interface' || b.kind === 'interface') return a.kind === b.kind && ar === br;
+  if (a.kind === 'file' && b.kind === 'file') return ar === br;
+  const aPrefix = a.kind === 'directory' ? `${ar}/` : ar;
+  const bPrefix = b.kind === 'directory' ? `${br}/` : br;
+  return ar === br || (a.kind === 'directory' && br.startsWith(aPrefix)) || (b.kind === 'directory' && ar.startsWith(bPrefix));
 }
