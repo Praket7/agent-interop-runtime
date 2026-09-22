@@ -195,14 +195,17 @@ export class WorkflowStore {
     return withStateLock(file, 'workflow', async () => {
       // Read current on-disk state inside the lock so parallel writers never lose records (AI-10).
       try {
-        this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+        // Merge authoritative disk state into the in-memory maps rather than clearing them.
+        // The state lock is re-entrant: an outer transaction may have uncommitted mutations
+        // (for example a review) when it calls another durable operation (e.g. addEvidence).
+        // Clearing here would erase that outer mutation before the nested transaction runs.
         this.adopt(JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-      // Transaction bodies may perform re-entrant durable operations (for example a review
-      // records evidence). Await the body before taking the final snapshot so the outer
-      // transaction can never overwrite a nested mutation with a premature snapshot.
+      // Transaction bodies may perform re-entrant durable operations. Await the body before
+      // taking the final snapshot so the outer transaction cannot overwrite nested state
+      // with a premature snapshot. Read-only refreshes perform full map replacement.
       const result = await fn();
       const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
       await atomicWriteJson(file, value);
