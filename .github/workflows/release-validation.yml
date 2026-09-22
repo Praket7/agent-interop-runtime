@@ -1,0 +1,29 @@
+name: Release validation
+
+on:
+  push:
+    branches:
+      - release-0.3.0-coordination-hardening
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm mcp:validate
+      - run: pnpm bench:check
+      - run: pnpm pack --pack-destination work
