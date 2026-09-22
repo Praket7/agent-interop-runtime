@@ -262,10 +262,13 @@ export class WorkflowStore {
       for (const claim of this.claims.values()) if (claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs) claim.status = 'expired';
       const existing = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.workId === input.workId && claim.sessionId === input.sessionId && claim.kind === kind && claim.mode === mode && claim.resource === resource);
       if (existing) return existing;
-      if (mode === 'exclusive') {
-        const conflict = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.mode === 'exclusive' && claim.sessionId !== input.sessionId && resourcesOverlap({ resource, kind }, claim));
-        if (conflict) throw new Error(`Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`);
-      }
+      const conflict = [...this.claims.values()].find((claim) =>
+        claim.status === 'active'
+        && claim.sessionId !== input.sessionId
+        && (mode === 'exclusive' || claim.mode === 'exclusive')
+        && resourcesOverlap({ resource, kind }, claim)
+      );
+      if (conflict) throw new Error(`Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`);
       const ttlSeconds = Math.min(3600, Math.max(30, Math.floor(input.ttlSeconds ?? 600)));
       const acquiredAt = now();
       const claim: ResourceClaim = { id: id('claim'), workId: input.workId, sessionId: input.sessionId, resource, kind, mode, status: 'active', acquiredAt, expiresAt: new Date(nowMs + ttlSeconds * 1000).toISOString() };
