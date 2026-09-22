@@ -45,9 +45,9 @@ async function discoverOpenCodeUrl(): Promise<URL | undefined> {
     try {
       const url = new URL(value);
       if (!isLoopbackHost(url.hostname)) continue;
-      const response = await fetch(new URL('/global/health', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders() });
+      const response = await fetch(new URL('/global/health', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders(), redirect: 'error' });
       if (response.ok) return url;
-      const sessions = await fetch(new URL('/session', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders() });
+      const sessions = await fetch(new URL('/session', url), { signal: AbortSignal.timeout(1200), headers: opencodeAuthHeaders(), redirect: 'error' });
       if (sessions.ok && Array.isArray(await sessions.json())) return url;
     } catch { /* try the next local listener */ }
   }
@@ -59,7 +59,7 @@ class OpenCodeHttpError extends Error { constructor(readonly status: number, rea
 export function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  if (host === '::1' || host === '::' || host === '[::1]') return true;
+  if (host === '::1') return true;
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
   return false;
 }
@@ -84,12 +84,17 @@ export class OpenCodeAdapter implements AgentAdapter {
   private managedServerStart?: Promise<URL | undefined>;
   constructor(base = process.env.OPENCODE_SERVER_URL ?? 'http://127.0.0.1:4096') { this.base = new URL(base); }
   private get remoteWithoutAuth(): boolean { return !isLoopbackHost(this.base.hostname) && !opencodeAuthHeaders().authorization; }
+  private get remoteInsecure(): boolean { return !isLoopbackHost(this.base.hostname) && this.base.protocol !== 'https:' && process.env.OPENCODE_ALLOW_INSECURE_REMOTE !== '1'; }
+  private assertEndpointSecurity(): void {
+    if (this.remoteInsecure) throw new Error('OpenCode remote endpoints require HTTPS; set OPENCODE_ALLOW_INSECURE_REMOTE=1 only on a trusted network');
+    if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD (a password alone uses the documented default username)');
+  }
   private async startManagedServer(): Promise<URL | undefined> {
     if (process.env.OPENCODE_AUTO_START === 'false' || !isLoopbackHost(this.base.hostname)) return undefined;
     if (this.managedServerStart && this.managedServer?.exitCode === null) {
       const existing = await this.managedServerStart;
       if (existing) {
-        try { const response = await fetch(new URL('/global/health', existing), { headers: opencodeAuthHeaders(), signal: AbortSignal.timeout(500) }); if (response.ok) return existing; } catch { /* restart below */ }
+        try { const response = await fetch(new URL('/global/health', existing), { headers: opencodeAuthHeaders(), signal: AbortSignal.timeout(500), redirect: 'error' }); if (response.ok) return existing; } catch { /* restart below */ }
       }
       this.managedServer?.kill();
     }
@@ -103,7 +108,7 @@ export class OpenCodeAdapter implements AgentAdapter {
         const url = new URL(`http://127.0.0.1:${port}`);
         for (let attempt = 0; attempt < 40; attempt += 1) {
           if (this.managedServer.exitCode !== null) return undefined;
-          try { const response = await fetch(new URL('/global/health', url), { headers: opencodeAuthHeaders(), signal: AbortSignal.timeout(500) }); if (response.ok) return url; } catch { /* wait for startup */ }
+          try { const response = await fetch(new URL('/global/health', url), { headers: opencodeAuthHeaders(), signal: AbortSignal.timeout(500), redirect: 'error' }); if (response.ok) return url; } catch { /* wait for startup */ }
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
       } catch { /* fall back to the normal unavailable-provider error */ }
@@ -113,7 +118,7 @@ export class OpenCodeAdapter implements AgentAdapter {
     })();
     return this.managedServerStart;
   }
-  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires OPENCODE_SERVER_USERNAME and OPENCODE_SERVER_PASSWORD (a password alone uses the documented default username)'); const run = async () => { const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }; try { return await run(); } catch (error) { if (error instanceof OpenCodeHttpError) throw error; const discovered = await discoverOpenCodeUrl(); if (discovered && discovered.href !== this.base.href) { this.base = discovered; return run(); } const managed = await this.startManagedServer(); if (managed) { this.base = managed; return run(); } throw error; } }
+  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { this.assertEndpointSecurity(); const run = async () => { const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000), redirect: 'error' }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }; try { return await run(); } catch (error) { if (error instanceof OpenCodeHttpError) throw error; const discovered = await discoverOpenCodeUrl(); if (discovered && discovered.href !== this.base.href) { this.base = discovered; return run(); } const managed = await this.startManagedServer(); if (managed) { this.base = managed; return run(); } throw error; } }
   private modelBody(selection: NonNullable<AgentSendOptions['model']>, field: 'modelID' | 'id') { return { providerID: selection.providerID, [field]: selection.modelID }; }
   private async requestWithModelFallback<T>(method: string, route: string, selection: NonNullable<AgentSendOptions['model']>, body: (model: Record<string, unknown>) => unknown): Promise<T> { try { return await this.request<T>(method, route, body(this.modelBody(selection, 'modelID'))); } catch (error) { if (!(error instanceof OpenCodeHttpError) || error.status !== 400 || !/(modelID|model id|unknown field|invalid model|expected id)/i.test(error.providerDetail)) throw error; return this.request<T>(method, route, body(this.modelBody(selection, 'id'))); } }
   async capabilities(): Promise<AgentCapabilities> { this.lastError = undefined; try { await this.request('GET', '/global/health'); this.available = true; } catch (first) { try { const sessions = await this.request<unknown>('GET', '/session'); if (!Array.isArray(sessions)) throw new Error('OpenCode /session returned malformed response'); this.available = true; } catch (error) { this.available = false; this.lastError = error instanceof Error ? error.message : String(error); } } const reason = this.available ? undefined : this.lastError ?? 'Start opencode serve --hostname 127.0.0.1 --port 4096 or set OPENCODE_SERVER_URL'; return { provider: this.id, adapterVersion: VERSION, authorization: this.available ? 'authorized' : 'unknown', discovery: cap(this.available, 'http', 'OpenCode server API', reason), sessions: cap(this.available, 'http', 'OpenCode session API', reason), sendMessage: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), steer: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), cancel: cap(this.available, 'http', 'POST /session/:id/abort', reason), events: cap(this.available, 'http', 'GET /event with reconnect', reason), diff: cap(this.available, 'http', 'GET /session/:id/diff', reason), permissions: cap(this.available, 'http', 'POST /session/:id/permissions/:permissionID', reason), model: cap(false, 'OpenCode prompt request', 'OpenCode server API', this.available ? 'Native session model mutation is not exposed by the validated API. Pass model on agent_send.' : reason), reasoning: cap(this.available, 'OpenCode prompt request', 'OpenCode model variant', this.available ? 'Mapped to the selected OpenCode model variant on the next prompt.' : reason), limitations: ['Existing session attachment requires a reachable OpenCode server', 'Accepted means the OpenCode HTTP endpoint accepted the prompt; it does not mean the agent completed it', 'Model selection is an explicit next prompt override, not persistent session mutation'] }; }
@@ -131,10 +136,10 @@ export class OpenCodeAdapter implements AgentAdapter {
     let failures = 0;
     while (true) {
       try {
-        if (this.remoteWithoutAuth) throw new Error('OpenCode remote endpoint requires credentials');
+        this.assertEndpointSecurity();
         // AI-07: same auth policy as normal requests, including the password-only default user.
         const headers: Record<string, string> = { accept: 'text/event-stream', ...opencodeAuthHeaders() };
-        const response = await fetch(new URL('/event', this.base), { headers, signal: AbortSignal.timeout(30_000) });
+        const response = await fetch(new URL('/event', this.base), { headers, signal: AbortSignal.timeout(30_000), redirect: 'error' });
         if (!response.ok || !response.body) throw new Error(`OpenCode event stream HTTP ${response.status}`);
         failures = 0;
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
