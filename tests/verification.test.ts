@@ -73,3 +73,16 @@ test('returns no git evidence outside a repository', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test('verification refuses command cwd escapes from the declared workspace', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-interop-contained-'));
+  try {
+    await assert.rejects(
+      () => verify({ cwd: directory, commands: { test: { ...nodeCommand("process.exit(0)"), cwd: '..' } }, git: false }),
+      /escapes the declared workspace/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
