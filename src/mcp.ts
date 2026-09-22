@@ -24,14 +24,35 @@ const verificationCommand = z.union([z.string().min(1), z.object({ executable: z
 const modelSelection = z.union([z.string().min(1), z.object({providerID:z.string().min(1),modelID:z.string().min(1),variant:z.string().min(1).optional()})]);
 
 export function createInteropRegistry(runtime: Runtime): InteropRegistry { return new InteropRegistry().register(new FreebuffAdapter(runtime)).register(new OpenCodeAdapter()).register(new CodexAdapter()).register(new ClaudeCodeAdapter()).register(new CursorAdapter()); }
-export function createServer(runtime: Runtime, includeWrites = true, profile: ProfileId = activeProfile()): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:VERSION}); const interop=createInteropRegistry(runtime);
-  // Section 4 gap: dispose the registry (and its native child processes) with the server.
-  const originalClose = s.close.bind(s); s.close = async () => { try { interop.dispose(); } finally { await originalClose(); } };  const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const conversations=new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json')); const ready=Promise.all([workflow.load(), conversations.load()]);
-  // Second readiness review blocker 3: crash recovery is part of the runtime workflow, not
-  // an unused store method. After initialization, queued outbound records from a previous
-  // crash are reclassified as delivery_unknown (never resent); their receipt transactions
-  // still close normally if the dispatch is actually still in flight in another process.
-  ready.then(() => conversations.reconcileInterruptedSends()).catch(() => undefined); // recovery must never block serving
+
+export interface InteropBackend {
+  interop: InteropRegistry;
+  workflow: WorkflowStore;
+  conversations: ConversationStore;
+  ready: Promise<unknown>;
+  dispose(): void;
+}
+
+/** Process-wide coordination backend. HTTP MCP sessions share this backend so they do not
+ * spawn duplicate native provider processes or maintain divergent event subscriptions. */
+export function createBackend(runtime: Runtime): InteropBackend {
+  const interop = createInteropRegistry(runtime);
+  const workflow = new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json'));
+  const conversations = new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json'));
+  const ready = Promise.all([workflow.load(), conversations.load()]);
+  ready.then(() => conversations.reconcileInterruptedSends()).catch(() => undefined);
+  return { interop, workflow, conversations, ready, dispose: () => interop.dispose() };
+}
+
+export function createServer(runtime: Runtime, includeWrites = true, profile: ProfileId = activeProfile(), backend?: InteropBackend): McpServer {
+  const s=new McpServer({name:'agent-interop-runtime',version:VERSION});
+  const ownsBackend = !backend;
+  const activeBackend = backend ?? createBackend(runtime);
+  const { interop, workflow, conversations, ready } = activeBackend;
+  if (ownsBackend) {
+    const originalClose = s.close.bind(s);
+    s.close = async () => { try { activeBackend.dispose(); } finally { await originalClose(); } };
+  }
   const withWorkflow = <T>(fn: () => Promise<T>) => ready.then(fn);
   // Profile gate (audit backlog item 5): profiles trim only the write surface; read tools
   // stay available in every profile. The default profile registers every write tool, so
@@ -110,6 +131,7 @@ async function body(req: IncomingMessage): Promise<unknown> {
 export async function runHttp(): Promise<void> {
   const runtime = await detectRuntime();
   const profile = activeProfile();
+  const backend = createBackend(runtime);
   const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
   const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
   if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
@@ -129,7 +151,7 @@ export async function runHttp(): Promise<void> {
       const parsed = await body(req);
       if (!session) {
         if (typeof sessionId === 'string' || !parsed || typeof parsed !== 'object' || (parsed as { method?: string }).method !== 'initialize') { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'mcp_session_required'})); return; }
-        const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile);
+        const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile,backend);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessionclosed: (closedId) => { sessions.delete(closedId); } });
         await mcp.connect(transport);
         session = { mcp, transport, lastSeen: Date.now() };
@@ -142,7 +164,7 @@ export async function runHttp(): Promise<void> {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
     }
   });
-  const cleanup=()=>{ clearInterval(cleanupSessions); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
+  const cleanup=()=>{ clearInterval(cleanupSessions); backend.dispose(); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
   console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
 }
