@@ -122,7 +122,10 @@ export class ConversationStore {
     return this.transact(() => {
       const conversation = this.require(conversationId);
       const existing = conversation.participants.find((value) => value.provider === participant.provider && value.nativeId === participant.nativeId);
-      if (!existing) conversation.participants.push({ ...participant, id: participant.id ?? `${participant.provider}:${participant.nativeId}` });
+      const participantId = participant.id ?? `${participant.provider}:${participant.nativeId}`;
+      const idCollision = conversation.participants.find((value) => value.id === participantId && (value.provider !== participant.provider || value.nativeId !== participant.nativeId));
+      if (idCollision) throw new Error(`Participant ID '${participantId}' is already bound to ${idCollision.provider}:${idCollision.nativeId}`);
+      if (!existing) conversation.participants.push({ ...participant, id: participantId });
       conversation.updatedAt = stamp();
       return clone(conversation);
     });
@@ -180,9 +183,12 @@ export class ConversationStore {
     // Blocker 3: mark the dispatch window so reconciliation treats the queued record as
     // healthy in-flight work, not a crash, while the provider call is executing.
     this.markDispatchStarted(pending.id);
+    const leaseTimer = setInterval(() => { void this.renewDispatchLease(pending.id, pending.dispatchLease?.id); }, 30_000);
+    leaseTimer.unref?.();
     try {
       receipt = await registry.send(provider, nativeId, envelope, 'send', options);
     } catch (error) {
+      clearInterval(leaseTimer);
       this.markDispatchFinished(pending.id);
       const reason = error instanceof Error ? error.message : String(error);
       // Provider never confirmed receipt: delivery outcome is unknown, not failed-and-resendable.
@@ -199,6 +205,7 @@ export class ConversationStore {
       });
       throw new Error(`Message ${pending.id} persisted with delivery_unknown; it may have reached the provider and must not be resent blindly: ${reason}`);
     }
+    clearInterval(leaseTimer);
     this.markDispatchFinished(pending.id);
     const delivery: DeliveryState = receipt.accepted ? (receipt.status === 'completed' ? 'completed' : 'queued') : 'rejected';
     await this.transact(() => {
@@ -338,6 +345,20 @@ export class ConversationStore {
       }
     }
     return out;
+  }
+
+  private async renewDispatchLease(messageId: string, leaseId?: string): Promise<void> {
+    if (!leaseId) return;
+    await this.transact(() => {
+      for (const conversation of this.conversations.values()) {
+        const message = conversation.messages.find((value) => value.id === messageId);
+        if (!message || message.delivery !== 'queued' || message.dispatchLease?.id !== leaseId) continue;
+        message.dispatchLease.expiresAt = new Date(Date.now() + 120_000).toISOString();
+        conversation.updatedAt = stamp();
+        break;
+      }
+      return null;
+    });
   }
 
   /** In-flight dispatch markers: message IDs whose provider call is currently executing in
