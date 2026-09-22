@@ -13,10 +13,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { withStateLock } from '../src/state.js';
 
-const dist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'src', 'state.js');
+const dist = pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'src', 'state.js')).href;
 
 async function tempDir(prefix: string): Promise<{ dir: string; cleanup: () => Promise<void> }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
