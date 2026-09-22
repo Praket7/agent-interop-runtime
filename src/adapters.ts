@@ -241,7 +241,7 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   private ownsProcess = false;
   private readonly sessions = new Map<string, AgentSession>();
   /** Pending provider permission requests surfaced through permission_pending (section 4 gap). */
-  protected pendingPermissions = new Map<string, { nativeId: string; sessionId: string; method: string; options: Json; requestedAt: string; resolve: (value: unknown) => void }>();
+  protected pendingPermissions = new Map<string, { requestId: string; nativeId: string; sessionId: string; method: string; options: Json; requestedAt: string; resolve: (value: unknown) => void }>();
   constructor(options: NativeAdapterOptions = {}) { this.options = options; this.rpc = options.rpc; }
   protected abstract initialize(): Promise<unknown>;
   protected abstract discover(): Promise<unknown[]>;
@@ -252,7 +252,7 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
   protected abstract sessionFrom(value: unknown, source: string): AgentSession | null;
   protected async connected(): Promise<boolean> { return this.connect(); }
   listPendingPermissions(): Array<{ requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> {
-    return [...this.pendingPermissions.entries()].map(([requestId, pending]) => ({ requestId, nativeId: pending.nativeId, method: pending.method, options: pending.options, requestedAt: pending.requestedAt }));
+    return [...this.pendingPermissions.values()].map((pending) => ({ requestId: pending.requestId, nativeId: pending.nativeId, method: pending.method, options: pending.options, requestedAt: pending.requestedAt }));
   }
   protected async handleServerRequest(message: RpcMessage): Promise<unknown> {
     const params = record(message.params);
@@ -260,8 +260,9 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
     if (message.method && /request_permission|approval/i.test(message.method)) {
       // Explicit human authorization only: the request stays pending until permission_respond.
       return await new Promise((resolve) => {
-        const key = `${sessionId}:${String(message.id)}`;
-        this.pendingPermissions.set(key, { nativeId: sessionId, sessionId, method: message.method!, options: json(params), requestedAt: now(), resolve });
+        const requestId = String(message.id);
+        const key = `${sessionId}:${requestId}`;
+        this.pendingPermissions.set(key, { requestId, nativeId: sessionId, sessionId, method: message.method!, options: json(params), requestedAt: now(), resolve });
       });
     }
     if (message.method !== 'fs/read_text_file') throw new Error(`Unsupported provider request ${message.method ?? 'unknown'}`);
