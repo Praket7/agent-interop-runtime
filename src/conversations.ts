@@ -183,7 +183,7 @@ export class ConversationStore {
     // Blocker 3: mark the dispatch window so reconciliation treats the queued record as
     // healthy in-flight work, not a crash, while the provider call is executing.
     this.markDispatchStarted(pending.id);
-    const leaseTimer = setInterval(() => { void this.renewDispatchLease(pending.id, pending.dispatchLease?.id); }, 30_000);
+    const leaseTimer = setInterval(() => { void this.renewDispatchLease(pending.id, pending.dispatchLease?.id).catch(() => undefined); }, 30_000);
     leaseTimer.unref?.();
     try {
       receipt = await registry.send(provider, nativeId, envelope, 'send', options);
@@ -214,7 +214,9 @@ export class ConversationStore {
       if (message) { message.receipt = receipt; message.delivery = delivery; delete message.dispatchLease; }
       return null;
     });
-    return { message: clone({ ...pending, receipt, delivery }), receipt: clone(receipt) };
+    const deliveredMessage = { ...pending, receipt, delivery };
+    delete deliveredMessage.dispatchLease;
+    return { message: clone(deliveredMessage), receipt: clone(receipt) };
   }
 
   /**
@@ -267,9 +269,11 @@ export class ConversationStore {
   /**
    * Crash-recovery reconciliation (second readiness review blockers 2 and 3).
    *
-   * Selection: records whose delivery is 'queued' (persisted, receipt phase never ran) or
-   * 'delivery_unknown' (dispatch outcome never learned). Terminal records ('completed',
-   * 'rejected') are never touched. A 'queued' record whose dispatch is still IN FLIGHT in
+   * Selection: records whose delivery is 'queued' AND has no provider receipt yet
+   * (persisted, receipt phase never ran), or 'delivery_unknown' (dispatch outcome never
+   * learned). A queued record with an accepted receipt is delivery-confirmed and is not an
+   * interrupted dispatch merely because the provider turn is still running. Terminal records
+   * ('completed', 'rejected') are never touched. A queued record whose dispatch is IN FLIGHT in
    * this process (marked via markDispatchStarted, called by send() around the provider
    * call) is skipped — a queued record is not proof of a crash; the in-flight marker is the
    * dispatch-interrupt identity. Queued records with no in-flight marker ARE interrupted
@@ -297,7 +301,7 @@ export class ConversationStore {
     await this.transact(() => {
       const candidates = [...this.conversations.values()]
         .filter((conversation) => !conversationId || conversation.id === conversationId)
-        .flatMap((conversation) => conversation.messages.filter((message) => message.delivery === 'queued' || message.delivery === 'delivery_unknown'));
+        .flatMap((conversation) => conversation.messages.filter((message) => message.delivery === 'delivery_unknown' || (message.delivery === 'queued' && !message.receipt)));
       for (const stored of candidates) {
         const conversation = this.conversations.get(stored.conversationId);
         const message = conversation?.messages.find((m) => m.id === stored.id);
