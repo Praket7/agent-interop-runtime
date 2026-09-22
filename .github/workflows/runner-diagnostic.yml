@@ -1,0 +1,21 @@
+name: Runner diagnostic
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: runner-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "runner=${{ runner.name }}"
+          echo "os=${{ runner.os }}"
+          node --version || true
+          uname -a
