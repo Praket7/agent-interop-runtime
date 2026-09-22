@@ -228,3 +228,29 @@ test('0.3: async review transactions persist nested evidence without overwriting
     assert.equal(evidence.some((value) => value.kind === 'review' && value.summary.includes('review verdict approve')), true);
   } finally { await cleanup(); }
 });
+
+
+test('0.3: provider-confirmed queued delivery is never reclassified as delivery_unknown', async () => {
+  const { file, cleanup } = await temp('interop-confirmed-queued-');
+  try {
+    const store = new ConversationStore(file);
+    const conversation = await store.create('confirmed queued');
+    await store.join(conversation.id, { provider: 'codex', nativeId: 'a' });
+    await store.join(conversation.id, { provider: 'codex', nativeId: 'b' });
+    const registry = {
+      send: async () => ({ provider: 'codex', nativeId: 'b', operation: 'send', accepted: true, status: 'queued' }),
+    } as never;
+    const sent = await store.send(conversation.id, 'codex:a', 'codex:b', 'accepted by provider', registry, undefined, undefined, 'confirmed-key');
+    assert.equal(sent.message.delivery, 'queued');
+    assert.equal(sent.message.receipt?.accepted, true);
+    assert.equal(sent.message.dispatchLease, undefined);
+
+    const fresh = new ConversationStore(file);
+    await fresh.load();
+    assert.deepEqual(await fresh.reconcileInterruptedSends(conversation.id), []);
+    const persisted = (await fresh.get(conversation.id))!.messages[0]!;
+    assert.equal(persisted.delivery, 'queued');
+    assert.equal(persisted.receipt?.accepted, true);
+    assert.equal(persisted.deliveryUnknownAt, undefined);
+  } finally { await cleanup(); }
+});
