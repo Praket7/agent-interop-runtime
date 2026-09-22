@@ -2,41 +2,59 @@ name: Publish MCP package and registry metadata
 
 on:
   push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
+        default: v0.3.0
+        type: string
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
 
 jobs:
   publish:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Retry v0.3.0 trusted publish')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out release source
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.3.0' }}
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Resolve and verify release version
+      - name: Resolve release tag
         shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             RELEASE_TAG="${GITHUB_REF#refs/tags/}"
           else
-            RELEASE_TAG="v0.3.0"
+            RELEASE_TAG="$DISPATCH_TAG"
           fi
-          VERSION="${RELEASE_TAG#v}"
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
-            echo "Release version $VERSION does not match package.json version $PACKAGE_VERSION" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
             exit 1
           fi
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Check out tagged release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Tag version $VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -60,7 +78,6 @@ jobs:
         run: pnpm mcp:validate
 
       - name: Run release gates
-        id: release_gates
         shell: bash
         run: |
           set -euo pipefail
@@ -107,21 +124,3 @@ jobs:
 
       - name: Publish MCP Registry metadata
         run: ./mcp-publisher publish
-
-      - name: Create GitHub Release
-        if: always() && steps.release_gates.outcome == 'success'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub Release already exists"
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$RELEASE_TAG" \
-              --title "Agent Interop Runtime $RELEASE_TAG" \
-              --generate-notes \
-              --verify-tag
-          fi
