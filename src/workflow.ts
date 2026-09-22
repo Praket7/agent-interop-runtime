@@ -500,7 +500,7 @@ export class WorkflowStore {
     for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
     for (const review of snap.reviews) edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
     for (const work of snap.works) for (const dependency of work.dependsOn ?? []) edges.push({ from: work.id, to: dependency, kind: 'depends_on' });
-    for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'shares_workspace_with' });
+    for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'claims' });
     return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews, claims: snap.claims };
   }
 }
