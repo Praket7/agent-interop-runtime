@@ -150,11 +150,14 @@ test('0.3: provider event pumps reopen after a native iterator ends', async () =
     events: async function* () { subscriptions += 1; yield { provider: 'codex', nativeId: 's', sequence: ++sequence, timestamp: new Date().toISOString(), type: 'event', data: null }; },
   } as any;
   const registry = new InteropRegistry().register(adapter);
-  const first = await registry.readEvents('codex', 's', 1, 1000, 0);
-  assert.equal(first[0]?.sequence, 1);
+  const first = await registry.readEventPage('codex', 's', 1, 1000, 0);
+  assert.equal(first.events[0]?.sequence, 1);
+  assert.equal(first.epoch, 1);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  const second = await registry.readEvents('codex', 's', 1, 1000, 1);
-  assert.equal(second[0]?.sequence, 2);
+  const second = await registry.readEventPage('codex', 's', 1, 1000, 1);
+  assert.equal(second.events[0]?.sequence, 2, 'registry cursor must not reset when the provider iterator reconnects');
+  assert.equal(second.epoch, 2);
+  assert.equal(second.next, 2);
   assert.equal(subscriptions, 2);
 });
 
