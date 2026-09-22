@@ -188,14 +188,22 @@ export class WorkflowStore {
     for (const item of Array.isArray(raw.claims) ? raw.claims : []) { const claim = item as ResourceClaim; if (claim?.id) this.claims.set(claim.id, claim); }
   }
 
-  private async transact<T>(fn: () => T): Promise<T> {
+  private async transact<T>(fn: () => T | Promise<T>): Promise<T> {
     await this.load();
-    if (!this.file) return fn();
+    if (!this.file) return await fn();
     const file = this.file;
     return withStateLock(file, 'workflow', async () => {
       // Read current on-disk state inside the lock so parallel writers never lose records (AI-10).
-      try { this.adopt(JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      const result = fn();
+      try {
+        this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+        this.adopt(JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      // Transaction bodies may perform re-entrant durable operations (for example a review
+      // records evidence). Await the body before taking the final snapshot so the outer
+      // transaction can never overwrite a nested mutation with a premature snapshot.
+      const result = await fn();
       const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
       await atomicWriteJson(file, value);
       return result;
