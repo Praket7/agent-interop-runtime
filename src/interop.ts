@@ -74,7 +74,7 @@ export interface EvidenceRecord {
 
 export interface WorkGraphSnapshot {
   sessions: AgentSession[];
-  edges: Array<{ from: string; to: string; kind: 'handoff' | 'review' | 'parent' | 'evidence' | 'depends_on' | 'verifies' | 'supersedes' | 'blocks' | 'shares_workspace_with' }>;
+  edges: Array<{ from: string; to: string; kind: 'handoff' | 'review' | 'parent' | 'evidence' | 'depends_on' | 'verifies' | 'supersedes' | 'blocks' | 'shares_workspace_with' | 'claims' }>;
   evidence: EvidenceRecord[];
 }
 
