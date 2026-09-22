@@ -48,6 +48,7 @@ const COORDINATION_WRITES = [
   'conversation_send',
   'conversation_reconcile',
   'handoff_create',
+  'handoff_update_status',
   'work_create',
   'work_verify',
   'review_create',
