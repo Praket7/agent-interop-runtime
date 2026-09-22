@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Json } from './types.js';
 import type { AgentSession, WorkGraphSnapshot } from './interop.js';
 import { runVerification, type VerificationResult, type VerificationCommands } from './verification.js';
@@ -19,6 +19,8 @@ export interface Evidence {
   capturedAt: string;
   summary: string;
   data: Json;
+  /** Stable digest of the evidence payload/provenance for compact cross-agent references. */
+  contentHash?: string;
 }
 
 export interface WorkRecord {
@@ -97,8 +99,9 @@ export type WorkSummary = Omit<WorkRecord, 'objective' | 'acceptanceCriteria' | 
 export type EvidenceSummary = Omit<Evidence, 'data'> & { dataBytes: number };
 
 const now = () => new Date().toISOString();
-const id = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+const id = (prefix: string) => `${prefix}_${randomUUID()}`;
 const json = (value: unknown): Json => JSON.parse(JSON.stringify(value ?? null)) as Json;
+const evidenceHash = (value: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Structured verification entries (AI-08): no whitespace splitting, quoted args preserved. */
 export interface VerificationRequest { executable: string; args?: string[]; cwd?: string; label?: string }
@@ -195,17 +198,21 @@ export class WorkflowStore {
     });
   }
 
-  async addEvidence(input: Omit<Evidence, 'id' | 'capturedAt'>): Promise<Evidence> {
+  async addEvidence(input: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): Promise<Evidence> {
     return this.transact(() => {
-      const evidence: Evidence = { ...input, id: id('evidence'), capturedAt: now(), data: json(input.data) };
+      if (input.workId && !this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      const normalized = { ...input, data: json(input.data) };
+      const evidence: Evidence = { ...normalized, id: id('evidence'), capturedAt: now(), contentHash: evidenceHash(normalized) };
       this.evidence.set(evidence.id, evidence);
       if (input.workId) {
-        const work = this.works.get(input.workId);
-        if (work && !work.evidenceIds.includes(evidence.id)) { work.evidenceIds.push(evidence.id); work.updatedAt = evidence.capturedAt; }
+        const work = this.works.get(input.workId)!;
+        if (!work.evidenceIds.includes(evidence.id)) { work.evidenceIds.push(evidence.id); work.updatedAt = evidence.capturedAt; }
       }
       return evidence;
     });
   }
+
+  async getEvidence(evidenceId: string): Promise<Evidence | null> { await this.refreshForRead(); return this.evidence.get(evidenceId) ?? null; }
 
   async listEvidence(workId?: string): Promise<Evidence[]> { await this.refreshForRead(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
 
@@ -216,6 +223,8 @@ export class WorkflowStore {
 
   async createHandoff(input: Omit<Handoff, 'id' | 'createdAt' | 'status' | 'contextTokens' | 'tokenBudget' | 'omittedFields'>): Promise<Handoff> {
     return this.transact(async () => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      for (const evidenceId of input.evidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for handoff ${input.workId}`);
       const budget = parseTokenBudget();
       // AIR-05: the budget applies to the COMPLETE serialized delivery packet (routing
       // metadata, field names, omission explanations, and accounting included), measured
@@ -338,6 +347,8 @@ export class WorkflowStore {
   async createReview(input: Omit<Review, 'id' | 'createdAt' | 'provenance'> & { provenance?: 'agent_claim' | 'provider_observed' }): Promise<Review> {
     const provenance = input.provenance ?? 'agent_claim';
     return this.transact(async () => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      for (const evidenceId of input.subjectEvidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for review ${input.workId}`);
       const review: Review = { ...input, provenance, id: id('review'), createdAt: now() };
       this.reviews.set(review.id, review);
       await this.addEvidence({
