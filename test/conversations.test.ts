@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { ConversationStore } from '../src/conversations.js';
 import { withStateLock } from '../src/state.js';
 
@@ -114,8 +115,9 @@ test('AIR-03: two real child processes serialize through the lock and both write
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-xproc-'));
   const file = path.join(dir, 'conversations.json');
   try {
+    const conversationsUrl = pathToFileURL(path.resolve('dist/src/conversations.js')).href;
     const script = [
-      `import { ConversationStore } from 'file://${path.resolve('dist/src/conversations.js')}';`,
+      `import { ConversationStore } from ${JSON.stringify(conversationsUrl)};`,
       `const store = new ConversationStore(${JSON.stringify(file)});`,
       `const label = process.argv[2];`,
       `const conversation = await store.create('proc ' + label);`,
