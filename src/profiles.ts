@@ -17,6 +17,7 @@ const INTEROP_READS = [
   'list_agent_sessions',
   'get_agent_diff',
   'events_read',
+  'events_page',
   'permission_pending',
 ] as const;
 
