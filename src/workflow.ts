@@ -34,6 +34,8 @@ export interface WorkRecord {
   risks: string[];
   unresolvedQuestions: string[];
   evidenceIds: string[];
+  /** Work graph dependencies that must remain visible across agent handoffs. */
+  dependsOn?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -63,7 +65,13 @@ export interface Handoff {
   risks: string[];
   unresolvedQuestions: string[];
   authorityBoundaries: string[];
-  status: 'created' | 'accepted' | 'completed' | 'blocked';
+  continuationState?: 'not_started' | 'in_progress' | 'needs_completion' | 'likely_complete' | 'existing_behavior_broken';
+  latestValidation?: { label?: string; command?: string; outcome: 'passed' | 'failed' | 'unknown'; observedAt?: string };
+  assumptions?: string[];
+  rollbackNotes?: string[];
+  nextAction?: string;
+  repositoryRevision?: string;
+  status: 'created' | 'accepted' | 'applied' | 'verified' | 'completed' | 'blocked' | 'superseded';
   /**
    * Token-budget accounting (audit §7 bounded handoff packet): the durable record keeps
    * every field (never silently loses constraints), and `contextTokens`/`omittedFields`
@@ -102,6 +110,12 @@ export interface HandoffPacket {
   changedFiles?: string[];
   unresolvedQuestions?: string[];
   risks?: string[];
+  continuationState?: Handoff['continuationState'];
+  latestValidation?: Handoff['latestValidation'];
+  assumptions?: string[];
+  rollbackNotes?: string[];
+  nextAction?: string;
+  repositoryRevision?: string;
   omissions: Array<{ field: string; reason: string }>;
   contextTokens: number;
   tokenBudget: number;
@@ -192,10 +206,11 @@ export class WorkflowStore {
     return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
   }
 
-  async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions'>>): Promise<WorkRecord> {
+  async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions' | 'dependsOn'>>): Promise<WorkRecord> {
     return this.transact(() => {
+      for (const dependency of input.dependsOn ?? []) if (!this.works.has(dependency)) throw new Error(`Unknown dependency work ${dependency}`);
       const stamp = now();
-      const work: WorkRecord = { id: id('work'), objective: input.objective, acceptanceCriteria: input.acceptanceCriteria, sourceSession: input.sourceSession, status: 'open', changedFiles: [], risks: input.risks ?? [], unresolvedQuestions: input.unresolvedQuestions ?? [], evidenceIds: [], createdAt: stamp, updatedAt: stamp };
+      const work: WorkRecord = { id: id('work'), objective: input.objective, acceptanceCriteria: input.acceptanceCriteria, sourceSession: input.sourceSession, status: 'open', changedFiles: [], risks: input.risks ?? [], unresolvedQuestions: input.unresolvedQuestions ?? [], evidenceIds: [], dependsOn: input.dependsOn ?? [], createdAt: stamp, updatedAt: stamp };
       this.works.set(work.id, work);
       return work;
     });
@@ -291,11 +306,17 @@ export class WorkflowStore {
         acceptanceCriteria: input.acceptanceCriteria,
         authorityBoundaries: input.authorityBoundaries,
       };
-      const optional: Array<{ name: 'evidenceIds' | 'changedFiles' | 'unresolvedQuestions' | 'risks'; value: string[] }> = [
+      const optional: Array<{ name: string; value: unknown }> = [
         { name: 'evidenceIds', value: input.evidenceIds },
         { name: 'changedFiles', value: input.changedFiles },
         { name: 'unresolvedQuestions', value: input.unresolvedQuestions },
         { name: 'risks', value: input.risks },
+        ...(input.continuationState ? [{ name: 'continuationState', value: input.continuationState }] : []),
+        ...(input.latestValidation ? [{ name: 'latestValidation', value: input.latestValidation }] : []),
+        ...(input.assumptions?.length ? [{ name: 'assumptions', value: input.assumptions }] : []),
+        ...(input.rollbackNotes?.length ? [{ name: 'rollbackNotes', value: input.rollbackNotes }] : []),
+        ...(input.nextAction ? [{ name: 'nextAction', value: input.nextAction }] : []),
+        ...(input.repositoryRevision ? [{ name: 'repositoryRevision', value: input.repositoryRevision }] : []),
       ];
       // Collision-resistant ID with a FIXED length (randomUUID is always 36 chars): no two
       // handoffs — even in the same millisecond — share an ID, and the serialized packet
@@ -385,6 +406,12 @@ export class WorkflowStore {
       changedFiles: handoff.changedFiles,
       unresolvedQuestions: handoff.unresolvedQuestions,
       risks: handoff.risks,
+      continuationState: handoff.continuationState,
+      latestValidation: handoff.latestValidation,
+      assumptions: handoff.assumptions,
+      rollbackNotes: handoff.rollbackNotes,
+      nextAction: handoff.nextAction,
+      repositoryRevision: handoff.repositoryRevision,
     };
     const packet: HandoffPacket = { handoffId: handoff.id, workId: handoff.workId, sourceSession: handoff.sourceSession, ...(handoff.destinationSession ? { destinationSession: handoff.destinationSession } : {}), omissions: [], contextTokens: handoff.contextTokens, tokenBudget: handoff.tokenBudget, tokenizer: TOKENIZER_NAME };
     for (const name of handoff.omittedFields) packet.omissions.push({ field: name, reason: `exceeds ${handoff.tokenBudget}-token handoff budget; request field explicitly from work ${handoff.workId}` });
@@ -393,6 +420,19 @@ export class WorkflowStore {
   }
 
   async listHandoffs(workId?: string): Promise<Handoff[]> { await this.refreshForRead(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
+
+  async updateHandoffStatus(handoffId: string, status: Handoff['status']): Promise<Handoff> {
+    return this.transact(() => {
+      const handoff = this.handoffs.get(handoffId);
+      if (!handoff) throw new Error(`Unknown handoff ${handoffId}`);
+      const allowed: Record<Handoff['status'], Handoff['status'][]> = {
+        created: ['accepted','blocked','superseded'], accepted: ['applied','blocked','superseded'], applied: ['verified','blocked','superseded'], verified: ['completed','blocked','superseded'], completed: [], blocked: ['accepted','superseded'], superseded: [],
+      };
+      if (handoff.status !== status && !allowed[handoff.status].includes(status)) throw new Error(`Invalid handoff transition ${handoff.status} -> ${status}`);
+      handoff.status = status;
+      return handoff;
+    });
+  }
 
   /**
    * AI-R1: caller-submitted reviews are recorded as agent_claim, never provider_observed.
@@ -456,6 +496,7 @@ export class WorkflowStore {
     const edges: WorkGraphSnapshot['edges'] = snap.evidence.filter((e) => e.workId).map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
     for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
     for (const review of snap.reviews) edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
+    for (const work of snap.works) for (const dependency of work.dependsOn ?? []) edges.push({ from: work.id, to: dependency, kind: 'depends_on' });
     for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'shares_workspace_with' });
     return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews, claims: snap.claims };
   }
