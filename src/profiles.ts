@@ -12,13 +12,29 @@ export const PROFILE_IDS: readonly ProfileId[] = ['minimal', 'core', 'freebuff',
 
 const STATUS = ['freebuff_status'] as const;
 
-const INTEROP_READS = [
+// Keep the default coordination profiles focused on the modern, common transport surface.
+// Compatibility/debug controls remain available in legacy/full so the default full profile
+// is backward compatible without forcing every core MCP client to serialize those schemas.
+const CORE_INTEROP_READS = [
   'list_agents',
   'list_agent_sessions',
   'get_agent_diff',
-  'events_read',
   'events_page',
+] as const;
+
+const CORE_INTEROP_WRITES = [
+  'agent_send',
+  'agent_cancel',
+  'session_create',
+  'session_resume',
+] as const;
+
+const OPTIONAL_NATIVE_TOOLS = [
+  'events_read',
   'permission_pending',
+  'permission_respond',
+  'session_set_model',
+  'session_set_reasoning',
 ] as const;
 
 const COORDINATION_READS = [
@@ -31,16 +47,6 @@ const COORDINATION_READS = [
   'conversation_list',
   'conversation_read',
   'claim_list',
-] as const;
-
-const INTEROP_WRITES = [
-  'agent_send',
-  'agent_cancel',
-  'session_create',
-  'session_resume',
-  'permission_respond',
-  'session_set_model',
-  'session_set_reasoning',
 ] as const;
 
 const COORDINATION_WRITES = [
@@ -81,10 +87,10 @@ const FREEBUFF_WRITES = [
   'set_reasoning',
 ] as const;
 
-const MINIMAL_TOOLS = [...STATUS, ...INTEROP_READS, ...INTEROP_WRITES];
+const MINIMAL_TOOLS = [...STATUS, ...CORE_INTEROP_READS, ...CORE_INTEROP_WRITES];
 const CORE_TOOLS = [...MINIMAL_TOOLS, ...COORDINATION_READS, ...COORDINATION_WRITES];
 const FREEBUFF_TOOLS = [...STATUS, ...FREEBUFF_READS, ...FREEBUFF_WRITES];
-const LEGACY_TOOLS = [...CORE_TOOLS, ...FREEBUFF_READS, ...FREEBUFF_WRITES];
+const LEGACY_TOOLS = [...CORE_TOOLS, ...OPTIONAL_NATIVE_TOOLS, ...FREEBUFF_READS, ...FREEBUFF_WRITES];
 const FULL_TOOLS = [...LEGACY_TOOLS];
 
 export function profileToolset(profile: ProfileId): ReadonlySet<string> {
@@ -109,10 +115,10 @@ export function activeProfile(): ProfileId {
 
 export function profileDescription(profile: ProfileId): string {
   switch (profile) {
-    case 'minimal': return 'Minimal: native provider discovery/control, bounded events/diffs, and permission handling only.';
-    case 'core': return 'Core: minimal provider control plus durable conversations, work, handoffs, evidence, reviews, and verification. Freebuff-specific project/thread tools are omitted.';
+    case 'minimal': return 'Minimal: native provider discovery/control with bounded event pages and diffs.';
+    case 'core': return 'Core: focused native provider control plus durable conversations, work, handoffs, evidence, reviews, claims, and verification. Compatibility-only native controls and Freebuff-specific tools are omitted.';
     case 'freebuff': return 'Freebuff: only Freebuff project/thread/file/model tools plus status.';
-    case 'legacy': return 'Legacy: core plus the complete Freebuff-specific surface; preserves the previous broad catalog.';
+    case 'legacy': return 'Legacy: core plus compatibility native controls and the complete Freebuff-specific surface; preserves the previous broad catalog.';
     case 'full': return 'Full: every tool the runtime offers.';
   }
 }
