@@ -1,29 +1,36 @@
 /**
- * Provider/toolset profiles (audit backlog item 5).
+ * Capability-oriented MCP tool profiles.
  *
- * A profile selects which tools a write-enabled server registers so hosts with context
- * constraints can expose a compact core catalog instead of the full 44-tool surface.
- * Profiles only ever REMOVE tools; they never redefine behavior, so a tool present in
- * two profiles behaves identically. The default profile is `full`, which is exactly the
- * pre-profiles catalog — existing clients see no change (compatibility contract).
- *
- * - `core`: discovery, session control, observation, handoffs, and evidence. Legacy
- *   per-provider Freebuff thread tools and coordinator bookkeeping tools are omitted.
- * - `legacy`: the core set plus the pre-unification Freebuff thread tools and the
- *   conversation coordinator; a bridge for clients built against the older surface.
- * - `full` (default): every tool, identical to the pre-profiles server.
- *
- * Read-only mode is orthogonal: it strips all mutation tools from whichever profile is
- * active, exactly as before.
+ * Profiles gate BOTH read and write tools. This matters because MCP clients generally
+ * serialize every visible tool schema into model context even when the tool is never used.
+ * Existing core/legacy/full names remain supported; minimal and freebuff add narrower
+ * surfaces for low-context and provider-specific deployments.
  */
+export type ProfileId = 'minimal' | 'core' | 'freebuff' | 'legacy' | 'full';
 
-export type ProfileId = 'core' | 'legacy' | 'full';
+export const PROFILE_IDS: readonly ProfileId[] = ['minimal', 'core', 'freebuff', 'legacy', 'full'];
 
-export const PROFILE_IDS: readonly ProfileId[] = ['core', 'legacy', 'full'];
+const STATUS = ['freebuff_status'] as const;
 
-/** Every registered write tool except work/evidence/review/verification administration. */
-const CORE_TOOLS = [
-  // Unified provider session control
+const INTEROP_READS = [
+  'list_agents',
+  'list_agent_sessions',
+  'get_agent_diff',
+  'events_read',
+  'permission_pending',
+] as const;
+
+const COORDINATION_READS = [
+  'get_work_graph',
+  'evidence_list',
+  'work_list',
+  'work_get',
+  'handoff_packet',
+  'conversation_list',
+  'conversation_read',
+] as const;
+
+const INTEROP_WRITES = [
   'agent_send',
   'agent_cancel',
   'session_create',
@@ -31,7 +38,11 @@ const CORE_TOOLS = [
   'permission_respond',
   'session_set_model',
   'session_set_reasoning',
-  // Coordinator flows (directed messaging + handoffs)
+] as const;
+
+const COORDINATION_WRITES = [
+  'conversation_create',
+  'conversation_join',
   'conversation_send',
   'conversation_reconcile',
   'handoff_create',
@@ -41,23 +52,41 @@ const CORE_TOOLS = [
   'review_request',
 ] as const;
 
-/** Legacy-only tools: per-provider Freebuff thread controls and coordinator bookkeeping. */
-const LEGACY_ONLY_TOOLS = [
+const FREEBUFF_READS = [
+  'list_projects',
+  'list_threads',
+  'get_thread',
+  'get_thread_messages',
+  'get_active_work',
+  'get_thread_progress',
+  'watch_thread',
+  'get_thread_progress_summary',
+  'watch_active_threads',
+  'list_project_files',
+  'read_project_file',
+  'list_models',
+] as const;
+
+const FREEBUFF_WRITES = [
   'send_message',
   'stop_thread',
   'resume_thread',
   'set_model',
   'set_reasoning',
-  'conversation_create',
-  'conversation_join',
 ] as const;
 
-const FULL_TOOLS = [...CORE_TOOLS, ...LEGACY_ONLY_TOOLS];
+const MINIMAL_TOOLS = [...STATUS, ...INTEROP_READS, ...INTEROP_WRITES];
+const CORE_TOOLS = [...MINIMAL_TOOLS, ...COORDINATION_READS, ...COORDINATION_WRITES];
+const FREEBUFF_TOOLS = [...STATUS, ...FREEBUFF_READS, ...FREEBUFF_WRITES];
+const LEGACY_TOOLS = [...CORE_TOOLS, ...FREEBUFF_READS, ...FREEBUFF_WRITES];
+const FULL_TOOLS = [...LEGACY_TOOLS];
 
 export function profileToolset(profile: ProfileId): ReadonlySet<string> {
   switch (profile) {
+    case 'minimal': return new Set(MINIMAL_TOOLS);
     case 'core': return new Set(CORE_TOOLS);
-    case 'legacy': return new Set([...CORE_TOOLS, ...LEGACY_ONLY_TOOLS]);
+    case 'freebuff': return new Set(FREEBUFF_TOOLS);
+    case 'legacy': return new Set(LEGACY_TOOLS);
     case 'full': return new Set(FULL_TOOLS);
   }
 }
@@ -74,8 +103,10 @@ export function activeProfile(): ProfileId {
 
 export function profileDescription(profile: ProfileId): string {
   switch (profile) {
-    case 'core': return 'Core: unified provider control, coordinator messaging, handoffs, and work/evidence tools. Legacy Freebuff thread tools are omitted.';
-    case 'legacy': return 'Legacy: core plus per-provider Freebuff thread tools and conversation bookkeeping, for clients built on the older surface.';
-    case 'full': return 'Full: every tool the runtime offers (the default, unchanged from before profiles existed).';
+    case 'minimal': return 'Minimal: native provider discovery/control, bounded events/diffs, and permission handling only.';
+    case 'core': return 'Core: minimal provider control plus durable conversations, work, handoffs, evidence, reviews, and verification. Freebuff-specific project/thread tools are omitted.';
+    case 'freebuff': return 'Freebuff: only Freebuff project/thread/file/model tools plus status.';
+    case 'legacy': return 'Legacy: core plus the complete Freebuff-specific surface; preserves the previous broad catalog.';
+    case 'full': return 'Full: every tool the runtime offers.';
   }
 }
