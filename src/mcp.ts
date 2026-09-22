@@ -117,13 +117,13 @@ export function createServer(runtime: Runtime, includeWrites = true, profile: Pr
 export async function runStdio(){const runtime=await detectRuntime();const profile=activeProfile();const server=createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }
 function authorized(req: IncomingMessage): boolean {
-  const expected = process.env.FREEBUFF_MCP_TOKEN;
+  const expected = process.env.AGENT_INTEROP_HTTP_TOKEN ?? process.env.FREEBUFF_MCP_TOKEN;
   if (!expected) return false;
   const supplied = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
   const a = Buffer.from(supplied); const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-function validOrigin(req: IncomingMessage): boolean { const origin = req.headers.origin; if (!origin) return true; const allowed = new Set((process.env.FREEBUFF_MCP_ALLOWED_ORIGINS ?? 'http://127.0.0.1,http://localhost').split(',').map((value) => value.trim()).filter(Boolean)); try { return allowed.has(new URL(origin).origin); } catch { return false; } }
+function validOrigin(req: IncomingMessage): boolean { const origin = req.headers.origin; if (!origin) return true; const allowed = new Set((process.env.AGENT_INTEROP_HTTP_ALLOWED_ORIGINS ?? process.env.FREEBUFF_MCP_ALLOWED_ORIGINS ?? 'http://127.0.0.1,http://localhost').split(',').map((value) => value.trim()).filter(Boolean)); try { return allowed.has(new URL(origin).origin); } catch { return false; } }
 async function body(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -135,9 +135,10 @@ export async function runHttp(): Promise<void> {
   const runtime = await detectRuntime();
   const profile = activeProfile();
   const backend = createBackend(runtime);
-  const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
-  const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
-  if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
+  const host = process.env.AGENT_INTEROP_HTTP_HOST ?? process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
+  const port = Number(process.env.AGENT_INTEROP_HTTP_PORT ?? process.env.FREEBUFF_MCP_PORT ?? 8788);
+  const allowRemote = process.env.AGENT_INTEROP_HTTP_ALLOW_REMOTE ?? process.env.FREEBUFF_MCP_ALLOW_REMOTE;
+  if (!isLoopback(host) && allowRemote !== '1') throw new Error('Refusing non-loopback HTTP host; set AGENT_INTEROP_HTTP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
   const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport; lastSeen: number }>();
   const requestCounts = new Map<string, { started: number; count: number }>();
   const cleanupSessions = setInterval(() => { const cutoff = Date.now() - 30 * 60_000; for (const [id, session] of sessions) if (session.lastSeen < cutoff) { void session.transport.close(); void session.mcp.close(); sessions.delete(id); } }, 60_000); cleanupSessions.unref?.();
@@ -169,5 +170,5 @@ export async function runHttp(): Promise<void> {
   });
   const cleanup=()=>{ clearInterval(cleanupSessions); backend.dispose(); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
-  console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
+  console.error(`agent-interop-runtime HTTP listening on http://${host}:${port}/mcp`);
 }

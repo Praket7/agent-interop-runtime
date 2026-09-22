@@ -173,3 +173,16 @@ test('0.3: endpoint security rejects IPv6 wildcard and blocks HTTP redirects', a
     assert.equal(redirect, 'error');
   } finally { globalThis.fetch = previousFetch; }
 });
+
+test('0.3: custom conversation participant IDs cannot alias another native session', async () => {
+  const { file, cleanup } = await temp('interop-participant-id-');
+  try {
+    const store = new ConversationStore(file);
+    const conversation = await store.create('ids');
+    await store.join(conversation.id, { provider: 'codex', nativeId: 'a', id: 'shared-name' });
+    await assert.rejects(
+      () => store.join(conversation.id, { provider: 'claude-code', nativeId: 'b', id: 'shared-name' }),
+      /already bound/,
+    );
+  } finally { await cleanup(); }
+});

@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -28,5 +32,6 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: pnpm mcp:validate
+      - run: pnpm schema:check
       - run: pnpm bench:check
       - run: pnpm pack --pack-destination work

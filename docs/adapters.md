@@ -6,7 +6,7 @@ Freebuff remains the source adapter. Desktop discovery uses fresh readiness data
 
 ## OpenCode
 
-Start the native server with `opencode serve` and set `OPENCODE_SERVER_URL` when needed. The adapter uses the documented session routes for list, create, prompt, async prompt, abort, permissions, and diff. It listens to the server event stream and filters events by exact session identity.
+Start the native server with `opencode serve` and set `OPENCODE_SERVER_URL` when needed. Non-loopback OpenCode endpoints require HTTPS plus credentials by default; `OPENCODE_ALLOW_INSECURE_REMOTE=1` is an explicit trusted-network escape hatch. The adapter uses the documented session routes for list, create, prompt, async prompt, abort, permissions, and diff. It listens to the server event stream and filters events by exact session identity.
 
 ## Codex
 
