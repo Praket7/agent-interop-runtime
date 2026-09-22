@@ -205,3 +205,26 @@ test('0.3: configured remote OpenCode failures never fall back to a local discov
     if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD; else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
   }
 });
+
+
+test('0.3: async review transactions persist nested evidence without overwriting it', async () => {
+  const { file, cleanup } = await temp('interop-review-atomic-');
+  try {
+    const store = new WorkflowStore(file);
+    const work = await store.createWork({ objective: 'review persistence', acceptanceCriteria: ['review stored'] });
+    const subject = await store.addEvidence({ workId: work.id, kind: 'diff', trust: 'runtime_observed', source: { adapter: 'fixture' }, summary: 'subject', data: { diff: 'x' } });
+    const review = await store.createReview({
+      workId: work.id,
+      subjectEvidenceIds: [subject.id],
+      reviewerSessionId: 'codex:reviewer',
+      independence: { differentSession: true, differentProvider: true, freshContext: true, writeAccess: false },
+      findings: [],
+      verdict: 'approve',
+    });
+    const fresh = new WorkflowStore(file);
+    await fresh.load();
+    assert.equal((await fresh.listReviews(work.id)).some((value) => value.id === review.id), true);
+    const evidence = await fresh.listEvidence(work.id);
+    assert.equal(evidence.some((value) => value.kind === 'review' && value.summary.includes('review verdict approve')), true);
+  } finally { await cleanup(); }
+});
