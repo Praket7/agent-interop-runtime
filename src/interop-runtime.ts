@@ -17,7 +17,16 @@ export class InteropRegistry {
   register(adapter: AgentAdapter) { this.adapters.set(adapter.id, adapter); return this; }
   listProviders(): ProviderId[] { return [...this.adapters.keys()]; }
   adapter(provider: ProviderId) { const value = this.adapters.get(provider); if (!value) throw new Error(`Unknown provider ${provider}`); return value; }
-  async capabilities(): Promise<AgentCapabilities[]> { return Promise.all([...this.adapters.values()].map((a) => a.capabilities())); }
+  async capabilities(): Promise<AgentCapabilities[]> {
+    return Promise.all([...this.adapters.values()].map(async (adapter) => {
+      try { return await adapter.capabilities(); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const unavailable = { supported: false, state: 'unavailable' as const, reason };
+        return { provider: adapter.id, adapterVersion: 'unknown', authorization: 'unknown' as const, discovery: unavailable, sessions: unavailable, sendMessage: unavailable, steer: unavailable, cancel: unavailable, events: unavailable, diff: unavailable, permissions: unavailable, model: unavailable, reasoning: unavailable, limitations: [`Capability probe failed: ${reason}`] };
+      }
+    }));
+  }
   async listSessions(provider?: ProviderId): Promise<AgentSession[]> { const run = this.discoveryQueue.then(async () => { this.sessionErrors = []; const adapters = provider ? [this.adapter(provider)] : [...this.adapters.values()]; const results = await Promise.all(adapters.map(async (adapter) => { try { return await adapter.listSessions(); } catch (error) { this.sessionErrors.push({ provider: adapter.id, error: error instanceof Error ? error.message : String(error) }); return []; } })); const sessions = results.flat(); for (const s of sessions) this.capture({ id: `${s.provider}:${s.nativeId}`, provider: s.provider, nativeId: s.nativeId, kind: 'session', capturedAt: new Date().toISOString(), trust: 'native', summary: s.title ?? 'Native session discovered', data: s as unknown as Json }); return sessions; }); this.discoveryQueue = run.then(() => undefined, () => undefined); return run; }
   getSessionErrors(): Array<{ provider: ProviderId; error: string }> { return [...this.sessionErrors]; }
   async send(provider: ProviderId, nativeId: string, text: string, mode: 'send' | 'steer' = 'send', options?: AgentSendOptions): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const adapter = this.adapter(provider); const fn = mode === 'steer' ? adapter.steer : adapter.send; if (!fn) throw new Error(`${provider} does not support ${mode}`); const result = await fn.call(adapter, nativeId, text, options); this.capture({ id: `${Date.now()}-${randomUUID()}`, provider, nativeId, kind: 'event', capturedAt: new Date().toISOString(), trust: 'observed', summary: `${mode} ${result.status ?? (result.accepted ? 'accepted' : 'rejected')}`, data: result.detail ?? null }); return result; }
@@ -95,7 +104,14 @@ export class InteropRegistry {
         if (buffer.history.length > EVENT_BUFFER_MAX) buffer.history.splice(0, buffer.history.length - EVENT_BUFFER_MAX);
         for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(next.value);
       }
-    } catch { /* adapter stream ended or errored; the next readEvents recreates the buffer */ }
+    } catch {
+      // A provider stream is allowed to terminate or reconnect. The buffer MUST become
+      // closed so the next read creates a fresh native subscription instead of remaining
+      // attached forever to a dead iterator.
+    } finally {
+      buffer.closed = true;
+      for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(null);
+    }
   }
   /** Section 4 gap: surface pending provider permission requests for human visibility. */
   pendingPermissions(): Array<{ provider: ProviderId; requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> {
