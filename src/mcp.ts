@@ -39,8 +39,10 @@ export function createBackend(runtime: Runtime): InteropBackend {
   const interop = createInteropRegistry(runtime);
   const workflow = new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json'));
   const conversations = new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json'));
-  const ready = Promise.all([workflow.load(), conversations.load()]);
-  ready.then(() => conversations.reconcileInterruptedSends()).catch(() => undefined);
+  const ready = Promise.all([workflow.load(), conversations.load()]).then(async (loaded) => {
+    try { await conversations.reconcileInterruptedSends(); } catch { /* best-effort startup recovery */ }
+    return loaded;
+  });
   return { interop, workflow, conversations, ready, dispose: () => interop.dispose() };
 }
 
