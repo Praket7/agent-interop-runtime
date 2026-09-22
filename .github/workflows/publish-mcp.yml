@@ -2,20 +2,41 @@ name: Publish MCP package and registry metadata
 
 on:
   push:
-    tags:
-      - 'v*'
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
   publish:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && github.event.head_commit.message == 'Retry v0.3.0 trusted publish')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out source
+      - name: Check out release source
         uses: actions/checkout@v7
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.3.0' }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve and verify release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+          else
+            RELEASE_TAG="v0.3.0"
+          fi
+          VERSION="${RELEASE_TAG#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Release version $VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
@@ -26,27 +47,23 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '22'
-          cache: pnpm
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Install current npm for trusted publishing
+        run: npm install --global npm@^11.15.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Verify tag matches package version
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
-            echo "Tag version $VERSION does not match package.json version $PACKAGE_VERSION" >&2
-            exit 1
-          fi
 
       - name: Verify release metadata
         run: pnpm mcp:validate
 
       - name: Run release gates
+        id: release_gates
+        shell: bash
         run: |
+          set -euo pipefail
           pnpm lint
           pnpm typecheck
           pnpm test
@@ -60,19 +77,16 @@ jobs:
         id: npm_release
         shell: bash
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          PUBLISHED="$(pnpm view "agent-interop-runtime@${VERSION}" version 2>/dev/null || true)"
+          PUBLISHED="$(npm view "agent-interop-runtime@${VERSION}" version 2>/dev/null || true)"
           if [ "$PUBLISHED" = "$VERSION" ]; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
           else
             echo "already_published=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish package to npm
+      - name: Publish package to npm with trusted publishing
         if: steps.npm_release.outputs.already_published != 'true'
-        run: pnpm publish --access public --provenance --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
 
       - name: Install pinned MCP publisher
         shell: bash
@@ -93,3 +107,21 @@ jobs:
 
       - name: Publish MCP Registry metadata
         run: ./mcp-publisher publish
+
+      - name: Create GitHub Release
+        if: always() && steps.release_gates.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$RELEASE_TAG" \
+              --title "Agent Interop Runtime $RELEASE_TAG" \
+              --generate-notes \
+              --verify-tag
+          fi
