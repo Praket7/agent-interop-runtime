@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 
 export type VerificationCommandName = 'test' | 'lint' | 'typecheck' | 'build' | `check${number}`;
 
@@ -105,7 +105,7 @@ function runProcess(executable: string, args: readonly string[], options: { cwd:
     let settled = false;
     let exited = false;
     let timedOut = false;
-    const child = spawn(executable, [...args], { cwd: options.cwd, env: { ...process.env, ...options.env }, shell: false, windowsHide: true });
+    const child = spawn(executable, [...args], { cwd: options.cwd, env: verificationEnv(options.env), shell: false, windowsHide: true });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
@@ -134,8 +134,29 @@ function displayCommand(command: VerificationCommand): string {
   return [command.executable, ...(command.args ?? [])].join(' ');
 }
 
+function containedCwd(root: string, requested?: string): string {
+  const base = resolve(root);
+  const cwd = resolve(base, requested ?? '.');
+  const rel = relative(base, cwd);
+  if (rel === '..' || rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(rel)) {
+    throw new Error(`Verification cwd escapes the declared workspace: ${requested ?? cwd}`);
+  }
+  return cwd;
+}
+
+function verificationEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sensitive = /token|secret|password|cookie|authorization|api[-_]?key|private[-_]?key|credential/i;
+  const safe: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) if (!sensitive.test(key) && value !== undefined) safe[key] = value;
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    if (sensitive.test(key)) throw new Error(`Verification environment refuses sensitive key ${key}`);
+    if (value !== undefined) safe[key] = value;
+  }
+  return safe;
+}
+
 async function runCommand(name: VerificationCommandName, command: VerificationCommand, options: Required<Pick<VerificationOptions, 'cwd' | 'maxOutputBytes' | 'timeoutMs'>> & Pick<VerificationOptions, 'env'>): Promise<CommandEvidence> {
-  const cwd = resolve(options.cwd, command.cwd ?? '.');
+  const cwd = containedCwd(options.cwd, command.cwd);
   const started = Date.now();
   const startedAt = new Date(started).toISOString();
   const result = await runProcess(command.executable, command.args ?? [], { cwd, env: options.env, timeoutMs: command.timeoutMs ?? options.timeoutMs, maxOutputBytes: options.maxOutputBytes });

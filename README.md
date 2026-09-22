@@ -53,8 +53,8 @@ agent-interop-runtime doctor
 You can also use the package without a global install.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.18 doctor
-pnpm dlx agent-interop-runtime@0.2.18 serve
+pnpm dlx agent-interop-runtime@0.3.0 doctor
+pnpm dlx agent-interop-runtime@0.3.0 serve
 ```
 
 The version is pinned in the examples so a host does not silently change behavior during startup. Update the version deliberately after reviewing a release.
@@ -81,8 +81,8 @@ enabled = true
 The installer can add or repair this entry.
 
 ```text
-pnpm dlx agent-interop-runtime@0.2.18 install
-pnpm dlx agent-interop-runtime@0.2.18 install --write
+pnpm dlx agent-interop-runtime@0.3.0 install
+pnpm dlx agent-interop-runtime@0.3.0 install --write
 ```
 
 The write command preserves unrelated Codex configuration, makes one backup, uses an atomic replacement, and refuses malformed existing content. Set `CODEX_HOME` when Codex uses a nonstandard configuration directory.
@@ -168,7 +168,7 @@ You can still start it manually:
 opencode serve --hostname 127.0.0.1 --port 4096
 ```
 
-Set `OPENCODE_SERVER_URL` for another local port. Remote OpenCode requires `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`. The default username is `opencode` when only a password is configured.
+Set `OPENCODE_SERVER_URL` for another local port. Remote OpenCode requires HTTPS plus `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`. The default username is `opencode` when only a password is configured. Plain HTTP on a non-loopback endpoint is refused unless `OPENCODE_ALLOW_INSECURE_REMOTE=1` is deliberately set for a trusted private network.
 
 Codex requires its app server to be installed and discoverable. Claude requires `claude-code-acp`. Cursor requires the `agent` command with ACP support. Provider credentials and client approvals remain user actions.
 
@@ -176,15 +176,31 @@ Model selection, agent selection, and reasoning selection are separate controls.
 
 ## Toolset profiles
 
-Write-enabled servers can expose a reduced catalog for hosts with tight context budgets. Profiles only remove tools; a tool present in two profiles behaves identically, and the default profile is unchanged from earlier releases.
+Profiles now gate both read and write schemas. This keeps irrelevant MCP definitions out of the model context instead of merely hiding mutation tools.
 
 ```text
-INTEROP_TOOLS_PROFILE=core   # unified provider control, coordinator messaging, handoffs, work/evidence
-INTEROP_TOOLS_PROFILE=legacy # core plus per-provider Freebuff thread tools and conversation bookkeeping
-INTEROP_TOOLS_PROFILE=full   # every tool (default)
+INTEROP_TOOLS_PROFILE=minimal  # native provider discovery/control/events only
+INTEROP_TOOLS_PROFILE=core     # minimal + work, evidence, handoffs, claims, reviews, conversations
+INTEROP_TOOLS_PROFILE=freebuff # Freebuff project/thread/file/model tools only
+INTEROP_TOOLS_PROFILE=legacy   # core + the complete Freebuff-specific surface
+INTEROP_TOOLS_PROFILE=full     # every tool (default, compatibility surface)
 ```
 
-The stdio server also accepts `--profile core` (and `legacy`/`full`). `freebuff_status` reports the active profile. Read-only mode (`INTEROP_READ_ONLY=1`) composes with any profile. Unknown profile values fail startup with the supported list.
+The stdio server accepts the same values through `--profile`. Read-only mode (`INTEROP_READ_ONLY=1`) composes with every profile. CI includes a catalog-budget check so narrow profiles cannot silently grow back toward the full schema surface.
+
+## Coordination and resumable handoffs
+
+Version 0.3 adds durable coordination primitives above the native provider transports.
+
+* `work_create` can declare work dependencies.
+* `claim_acquire`, `claim_list`, and `claim_release` provide atomic file, directory, interface, and workspace claim state with leases. Conflicting exclusive claims are rejected by the runtime. Claims coordinate cooperative agents; they do not intercept filesystem writes performed outside this runtime.
+* `handoff_create` can carry continuation state, latest validation, assumptions, rollback notes, a recommended next action, and a repository revision while still obeying the configured handoff token budget.
+* `handoff_update_status` records an explicit created → accepted → applied → verified → completed lifecycle, with blocked and superseded states.
+* Evidence records receive SHA-256 content hashes and can be fetched individually with `evidence_get`. Review requests send bounded handoff packets and evidence references instead of re-inlining an arbitrarily large diff.
+* `events_page` adds a registry-owned monotonic cursor, reconnect epoch, and retention-gap metadata while `events_read` remains available for compatibility.
+* HTTP MCP clients share one process-wide provider backend so multiple client sessions do not spawn duplicate native provider processes.
+
+Structured handoff notes are historical evidence, not ground truth. Successor agents should verify important claims against the repository and current provider state.
 
 ## Benchmarks
 
@@ -217,9 +233,9 @@ The coordinator is local. It does not grant a provider permission to edit a work
 
 Read only mode is used when authorization or provider control is unavailable.
 
-The runtime redacts credential shaped fields and bounds diagnostic output. File access is restricted to approved project roots. Protected credential files are denied. Large files are rejected. Local verification is disabled unless `INTEROP_ALLOW_VERIFICATION=1` is explicitly set.
+The runtime redacts credential shaped fields and bounds diagnostic output. File access is restricted to approved project roots. Protected credential files are denied. Large files are rejected. Local verification is disabled unless `INTEROP_ALLOW_VERIFICATION=1` is explicitly set. Verification requires an explicit workspace or a work item linked to a native session with a verified workspace, rejects command working directories that escape that root, and removes credential-shaped environment variables before spawning checks.
 
-HTTP mode binds to loopback by default and requires a bearer token. Remote binding requires an explicit opt in and trusted network protection. Origin checks, request limits, idle session cleanup, and MCP session cleanup are enabled.
+HTTP mode binds to loopback by default and requires a bearer token. Canonical HTTP settings use `AGENT_INTEROP_HTTP_TOKEN`, `AGENT_INTEROP_HTTP_HOST`, `AGENT_INTEROP_HTTP_PORT`, `AGENT_INTEROP_HTTP_ALLOWED_ORIGINS`, and `AGENT_INTEROP_HTTP_ALLOW_REMOTE`; the older `FREEBUFF_MCP_*` names remain compatibility aliases. Remote binding requires an explicit opt in and trusted HTTPS or private-network protection. Origin checks, request limits, idle session cleanup, and MCP session cleanup are enabled.
 
 ## Verification
 
@@ -236,7 +252,7 @@ pnpm pty:probe
 pnpm pack:check
 ```
 
-GitHub Actions runs the same checks on Ubuntu macOS and Windows. The matrix also tests Node 20 22 24 and 26. The PTY probe is an environment check. It proves that the native PTY can start on that runner. It does not prove that Freebuff is installed or signed in on that runner.
+GitHub Actions runs lint, type checking, tests, build, MCP metadata validation, catalog-budget checks, benchmark checks, and package creation on Ubuntu, macOS, and Windows with Node 22. The package engine range remains Node 20 through Node 26; broader runtime compatibility can be exercised separately from the release gate. Live provider authentication is environment dependent.
 
 ## What is not promised
 

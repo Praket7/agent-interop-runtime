@@ -24,22 +24,40 @@ const verificationCommand = z.union([z.string().min(1), z.object({ executable: z
 const modelSelection = z.union([z.string().min(1), z.object({providerID:z.string().min(1),modelID:z.string().min(1),variant:z.string().min(1).optional()})]);
 
 export function createInteropRegistry(runtime: Runtime): InteropRegistry { return new InteropRegistry().register(new FreebuffAdapter(runtime)).register(new OpenCodeAdapter()).register(new CodexAdapter()).register(new ClaudeCodeAdapter()).register(new CursorAdapter()); }
-export function createServer(runtime: Runtime, includeWrites = true, profile: ProfileId = activeProfile()): McpServer { const s=new McpServer({name:'agent-interop-runtime',version:VERSION}); const interop=createInteropRegistry(runtime);
-  // Section 4 gap: dispose the registry (and its native child processes) with the server.
-  const originalClose = s.close.bind(s); s.close = async () => { try { interop.dispose(); } finally { await originalClose(); } };  const workflow=new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json')); const conversations=new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json')); const ready=Promise.all([workflow.load(), conversations.load()]);
-  // Second readiness review blocker 3: crash recovery is part of the runtime workflow, not
-  // an unused store method. After initialization, queued outbound records from a previous
-  // crash are reclassified as delivery_unknown (never resent); their receipt transactions
-  // still close normally if the dispatch is actually still in flight in another process.
-  ready.then(() => conversations.reconcileInterruptedSends()).catch(() => undefined); // recovery must never block serving
+
+export interface InteropBackend {
+  interop: InteropRegistry;
+  workflow: WorkflowStore;
+  conversations: ConversationStore;
+  ready: Promise<unknown>;
+  dispose(): void;
+}
+
+/** Process-wide coordination backend. HTTP MCP sessions share this backend so they do not
+ * spawn duplicate native provider processes or maintain divergent event subscriptions. */
+export function createBackend(runtime: Runtime): InteropBackend {
+  const interop = createInteropRegistry(runtime);
+  const workflow = new WorkflowStore(process.env.INTEROP_STATE_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'state.json'));
+  const conversations = new ConversationStore(process.env.INTEROP_CONVERSATIONS_FILE ?? path.join(os.homedir(), '.agent-interop-runtime', 'conversations.json'));
+  const ready = Promise.all([workflow.load(), conversations.load()]);
+  ready.then(() => conversations.reconcileInterruptedSends()).catch(() => undefined);
+  return { interop, workflow, conversations, ready, dispose: () => interop.dispose() };
+}
+
+export function createServer(runtime: Runtime, includeWrites = true, profile: ProfileId = activeProfile(), backend?: InteropBackend): McpServer {
+  const s=new McpServer({name:'agent-interop-runtime',version:VERSION});
+  const ownsBackend = !backend;
+  const activeBackend = backend ?? createBackend(runtime);
+  const { interop, workflow, conversations, ready } = activeBackend;
+  if (ownsBackend) {
+    const originalClose = s.close.bind(s);
+    s.close = async () => { try { activeBackend.dispose(); } finally { await originalClose(); } };
+  }
   const withWorkflow = <T>(fn: () => Promise<T>) => ready.then(fn);
-  // Profile gate (audit backlog item 5): profiles trim only the write surface; read tools
-  // stay available in every profile. The default profile registers every write tool, so
-  // existing clients see no change. Read-only mode still strips mutation tools on top.
-  const enabledFor = (name: string) => {
-    if (!profileToolset('full').has(name)) return true; // read tools: never profile-gated
-    return includeWrites && profileToolset(profile).has(name);
-  };
+  // Capability profiles gate the entire catalog, including reads. MCP clients commonly
+  // serialize every visible tool schema into model context, so hiding irrelevant read tools
+  // is as important as hiding writes. Read-only mode still strips writes independently.
+  const enabledFor = (name: string) => profileToolset(profile).has(name);
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>{ if (!enabledFor(name)) return; s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]})); };
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities().then((caps)=>({ ...caps, toolsetProfile: profile, toolsetProfileDescription: profileDescription(profile) })));
   read('list_projects','List discovered Freebuff projects.',{},()=>runtime.listProjects());
@@ -58,13 +76,16 @@ export function createServer(runtime: Runtime, includeWrites = true, profile: Pr
   read('list_agent_sessions','Discover native sessions across configured providers. Provider failures are returned separately from an empty session list.',{provider:providers.optional()},async(a)=>({sessions:await interop.listSessions(a.provider as ProviderId|undefined),providerErrors:interop.getSessionErrors()}));
   read('get_work_graph','Return the provider independent session and evidence graph, including any durable state recovery warning.',{},()=>withWorkflow(async()=>({...(await workflow.graph(await interop.listSessions())),stateRecoveryRequired:workflow.recoveryStatus()})));
   read('get_agent_diff','Read native diff evidence while preserving provider identity.',{provider:providers,nativeId:z.string()},(a)=>interop.diff(a.provider as ProviderId,a.nativeId));
-  read('events_read','Read bounded native events from one shared per-session stream. Count- and deadline-bounded; pass the last event sequence back as afterSequence for exactly-once continuation.',{provider:providers,nativeId:z.string(),afterSequence:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional(),timeoutMs:z.number().int().min(0).max(30000).optional()},(a)=>interop.readEvents(a.provider as ProviderId,a.nativeId,a.limit ?? 50,a.timeoutMs ?? 5_000,a.afterSequence ?? 0));
+  read('events_read','Read bounded native events from one shared per-session stream. Legacy array response; events_page is preferred for reconnect/gap metadata.',{provider:providers,nativeId:z.string(),afterSequence:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional(),timeoutMs:z.number().int().min(0).max(30000).optional()},(a)=>interop.readEvents(a.provider as ProviderId,a.nativeId,a.limit ?? 50,a.timeoutMs ?? 5_000,a.afterSequence ?? 0));
+  read('events_page','Read bounded native events with a registry-owned monotonic cursor, stream epoch, and retention-gap metadata across provider reconnects.',{provider:providers,nativeId:z.string(),afterSequence:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional(),timeoutMs:z.number().int().min(0).max(30000).optional()},(a)=>interop.readEventPage(a.provider as ProviderId,a.nativeId,a.limit ?? 50,a.timeoutMs ?? 5_000,a.afterSequence ?? 0));
   read('evidence_list','List evidence captured by the runtime. Metadata only: contents are addressable by evidence ID.',{workId:z.string().optional()},(a)=>withWorkflow(()=>workflow.listEvidenceSummaries(a.workId)));
+  read('evidence_get','Read one exact evidence record by ID. Use this after handoffs/reviews instead of inlining large diffs or logs.',{evidenceId:z.string().min(1)},(a)=>withWorkflow(()=>workflow.getEvidence(a.evidenceId)));
   read('work_list','List durable work records with objective previews and criteria counts.',{},()=>withWorkflow(()=>workflow.listWorks()));
   read('work_get','Read a durable work record and its evidence.',{workId:z.string()},(a)=>withWorkflow(async()=>({work:await workflow.getWork(a.workId),evidence:await workflow.listEvidence(a.workId),handoffs:await workflow.listHandoffs(a.workId),reviews:await workflow.listReviews(a.workId)})));
   read('handoff_packet','Read the bounded delivery packet for a handoff: fields kept within the token budget plus explicit omissions and how to request them.',{handoffId:z.string()},(a)=>withWorkflow(()=>workflow.handoffPacket(a.handoffId)));
   read('conversation_list','List shared conversations; metadata only unless detail:true.',{detail:z.boolean().optional()},async(a)=>conversations.list({detail:a?.detail===true}));
   read('conversation_read','Read a cursor-paged transcript page; pass next back for exactly-once reads.',{conversationId:z.string(),after:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional()},(a)=>conversations.read(a.conversationId,a.after ?? 0,a.limit ?? 100));
+  read('claim_list','List durable resource ownership claims. Active claims are runtime-enforced coordination state, not chat suggestions.',{workId:z.string().optional(),activeOnly:z.boolean().optional()},(a)=>withWorkflow(()=>workflow.listClaims(a.workId,a.activeOnly ?? false)));
   read('permission_pending','List provider permission requests awaiting an explicit human decision. Never auto-approved.',{},async()=>({pending:interop.pendingPermissions()}));
   if (!includeWrites) return s;
   const write=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>{ if (!enabledFor(name)) return; s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:false,destructiveHint:false,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]})); };
@@ -84,22 +105,25 @@ export function createServer(runtime: Runtime, includeWrites = true, profile: Pr
   write('conversation_reconcile','Recover interrupted outbound sends after a crash: reclassify stuck queued/unknown records and close them with caller-verified provider receipts (never auto-resends).',{conversationId:z.string().optional(),observedReceipts:z.array(z.object({idempotencyKey:z.string().min(1),receipt:z.object({provider:providers,nativeId:z.string(),operation:z.string(),accepted:z.boolean(),status:z.string(),detail:z.unknown().optional()})})).optional()},(a)=>withWorkflow(()=>conversations.reconcileInterruptedSends(a.conversationId,a.observedReceipts)));
   write('conversation_join','Attach an exact native provider session to a shared conversation.',{conversationId:z.string(),provider:providers,nativeId:z.string(),workspaceId:z.string().optional(),role:z.enum(['sender','reviewer','editor']).optional()},(a)=>conversations.join(a.conversationId,{provider:a.provider as ProviderId,nativeId:a.nativeId,workspaceId:a.workspaceId,role:a.role}));
   write('conversation_send','Persist before delivery; receipt distinguishes queued/rejected/delivery_unknown. Pass idempotencyKey (e.g. workId/handoffId) to make retries safe. Replies need another explicit send.',{conversationId:z.string(),sender:z.string(),recipient:z.string(),text:z.string().min(1).max(100000),replyTo:z.string().optional(),idempotencyKey:z.string().min(1).max(200).optional(),model:z.object({providerID:z.string().min(1),modelID:z.string().min(1),variant:z.string().min(1).optional()}).optional(),reasoning:z.string().optional()},(a)=>{ if (typeof a.model === 'string') throw new Error('conversation_send requires the structured model object {providerID, modelID}; a bare string would be silently discarded'); return conversations.send(a.conversationId,a.sender,a.recipient,a.text,interop,{model:a.model,reasoning:a.reasoning},a.replyTo,a.idempotencyKey); });
-  write('work_create','Create a durable work item with acceptance criteria.',{objective:z.string().min(1),acceptanceCriteria:z.array(z.string()).min(1),sourceSession:z.string().optional(),risks:z.array(z.string()).optional(),unresolvedQuestions:z.array(z.string()).optional()},(a)=>withWorkflow(()=>workflow.createWork(a)));
-  write('handoff_create','Create a structured work handoff between exact native sessions. The durable record keeps every field; the response reports the delivery packet size against the token budget and any explicit omissions.',{workId:z.string(),sourceSession:z.string(),destinationSession:z.string().optional(),objective:z.string(),acceptanceCriteria:z.array(z.string()),evidenceIds:z.array(z.string()),changedFiles:z.array(z.string()),risks:z.array(z.string()),unresolvedQuestions:z.array(z.string()),authorityBoundaries:z.array(z.string())},(a)=>withWorkflow(()=>workflow.createHandoff(a)));
+  write('work_create','Create a durable work item with acceptance criteria and optional dependencies on existing work.',{objective:z.string().min(1),acceptanceCriteria:z.array(z.string()).min(1),sourceSession:z.string().optional(),risks:z.array(z.string()).optional(),unresolvedQuestions:z.array(z.string()).optional(),dependsOn:z.array(z.string()).optional()},(a)=>withWorkflow(()=>workflow.createWork(a)));
+  write('handoff_create','Create a structured work handoff between exact native sessions. The durable record keeps every field; the bounded delivery packet preserves deterministic continuation state and explicit omissions.',{workId:z.string(),sourceSession:z.string(),destinationSession:z.string().optional(),objective:z.string(),acceptanceCriteria:z.array(z.string()),evidenceIds:z.array(z.string()),changedFiles:z.array(z.string()),risks:z.array(z.string()),unresolvedQuestions:z.array(z.string()),authorityBoundaries:z.array(z.string()),continuationState:z.enum(['not_started','in_progress','needs_completion','likely_complete','existing_behavior_broken']).optional(),latestValidation:z.object({label:z.string().optional(),command:z.string().optional(),outcome:z.enum(['passed','failed','unknown']),observedAt:z.string().optional()}).optional(),assumptions:z.array(z.string()).optional(),rollbackNotes:z.array(z.string()).optional(),nextAction:z.string().optional(),repositoryRevision:z.string().optional()},(a)=>withWorkflow(()=>workflow.createHandoff(a)));
+  write('handoff_update_status','Advance a handoff through the explicit lifecycle created → accepted → applied → verified → completed, with blocked/superseded escape states.',{handoffId:z.string().min(1),status:z.enum(['created','accepted','applied','verified','completed','blocked','superseded'])},(a)=>withWorkflow(()=>workflow.updateHandoffStatus(a.handoffId,a.status)));
   write('review_create','Record a review; caller submissions are agent_claim, never provider observations.',{workId:z.string(),subjectEvidenceIds:z.array(z.string()),reviewerSessionId:z.string(),independence:z.object({differentSession:z.boolean(),differentProvider:z.boolean(),freshContext:z.boolean(),writeAccess:z.boolean()}),findings:z.array(z.object({id:z.string(),severity:z.enum(['blocking','major','minor','note']),title:z.string(),detail:z.string(),file:z.string().optional(),line:z.number().int().optional()})),verdict:z.enum(['approve','changes_requested','blocked'])},(a)=>withWorkflow(()=>workflow.createReview(a)));
-  write('review_request','Send an evidence-backed review request; the repository-diff fallback requires the subject session workspace and never guesses process.cwd().',{workId:z.string(),subjectProvider:providers,subjectNativeId:z.string(),reviewerProvider:providers,reviewerNativeId:z.string(),objective:z.string(),acceptanceCriteria:z.array(z.string())},(a)=>withWorkflow(async()=>{ let diff: Json; let trust: 'provider_observed' | 'repository_verified' = 'provider_observed'; try { diff=await interop.diff(a.subjectProvider as ProviderId,a.subjectNativeId) ?? null; } catch { const sessions=await interop.listSessions(); const subject=sessions.find((s)=>s.provider===a.subjectProvider&&s.nativeId===a.subjectNativeId); if (!subject?.cwd) throw new Error(`No verified workspace is recorded for ${a.subjectProvider}:${a.subjectNativeId}; refusing the repository-diff fallback because it could review the wrong workspace`); diff=await repositoryDiff(subject.cwd) as unknown as Json; trust='repository_verified'; } const evidence=await workflow.addEvidence({workId:a.workId,sessionId:`${a.subjectProvider}:${a.subjectNativeId}`,kind:'diff',trust,source:{adapter:a.subjectProvider},summary:trust === 'provider_observed' ? 'Subject native diff for review' : 'Repository diff fallback for review (workspace verified from session discovery)',data:diff}); const handoff=await workflow.createHandoff({workId:a.workId,sourceSession:`${a.subjectProvider}:${a.subjectNativeId}`,destinationSession:`${a.reviewerProvider}:${a.reviewerNativeId}`,objective:a.objective,acceptanceCriteria:a.acceptanceCriteria,evidenceIds:[evidence.id],changedFiles:[],risks:[],unresolvedQuestions:[],authorityBoundaries:['Reviewer may report findings but may not mutate the subject session']}); const receipt=await interop.send(a.reviewerProvider as ProviderId,a.reviewerNativeId,`Review work ${a.workId}. Objective ${a.objective}. Acceptance criteria ${JSON.stringify(a.acceptanceCriteria)}. Evidence ${JSON.stringify({evidenceId:evidence.id,diff})}`); return {handoff,evidence,receipt}; }));
-  write('work_verify','Run all accepted verification commands (max 8). Entries are strings or {executable,args,cwd}. Requires INTEROP_ALLOW_VERIFICATION=1.',{workId:z.string(),cwd:z.string().optional(),commands:z.array(verificationCommand).min(1).max(8)},(a)=>withWorkflow(()=>{ if (process.env.INTEROP_ALLOW_VERIFICATION !== '1') throw new Error('Verification is disabled by default; set INTEROP_ALLOW_VERIFICATION=1 only for a trusted local MCP client'); return workflow.verify(a.workId,a.cwd ?? process.cwd(),a.commands); }));
+  write('claim_acquire','Atomically claim a file, directory, interface, or workspace for a work item. Conflicting exclusive claims are rejected by the runtime.',{workId:z.string(),sessionId:z.string().min(1),resource:z.string().min(1).max(2000),kind:z.enum(['file','directory','interface','workspace']).optional(),mode:z.enum(['exclusive','shared_read']).optional(),ttlSeconds:z.number().int().min(30).max(3600).optional()},(a)=>withWorkflow(()=>workflow.claimResource(a)));
+  write('claim_release','Release a durable resource claim. Supplying sessionId prevents one agent from releasing another agent\'s claim.',{claimId:z.string().min(1),sessionId:z.string().min(1).optional()},(a)=>withWorkflow(()=>workflow.releaseClaim(a.claimId,a.sessionId)));
+  write('review_request','Send an evidence-backed review request; the repository-diff fallback requires the subject session workspace and never guesses process.cwd().',{workId:z.string(),subjectProvider:providers,subjectNativeId:z.string(),reviewerProvider:providers,reviewerNativeId:z.string(),objective:z.string(),acceptanceCriteria:z.array(z.string())},(a)=>withWorkflow(async()=>{ let diff: Json; let trust: 'provider_observed' | 'repository_verified' = 'provider_observed'; try { diff=await interop.diff(a.subjectProvider as ProviderId,a.subjectNativeId) ?? null; } catch { const sessions=await interop.listSessions(); const subject=sessions.find((s)=>s.provider===a.subjectProvider&&s.nativeId===a.subjectNativeId); if (!subject?.cwd) throw new Error(`No verified workspace is recorded for ${a.subjectProvider}:${a.subjectNativeId}; refusing the repository-diff fallback because it could review the wrong workspace`); diff=await repositoryDiff(subject.cwd) as unknown as Json; trust='repository_verified'; } const evidence=await workflow.addEvidence({workId:a.workId,sessionId:`${a.subjectProvider}:${a.subjectNativeId}`,kind:'diff',trust,source:{adapter:a.subjectProvider},summary:trust === 'provider_observed' ? 'Subject native diff for review' : 'Repository diff fallback for review (workspace verified from session discovery)',data:diff}); const handoff=await workflow.createHandoff({workId:a.workId,sourceSession:`${a.subjectProvider}:${a.subjectNativeId}`,destinationSession:`${a.reviewerProvider}:${a.reviewerNativeId}`,objective:a.objective,acceptanceCriteria:a.acceptanceCriteria,evidenceIds:[evidence.id],changedFiles:[],risks:[],unresolvedQuestions:[],authorityBoundaries:['Reviewer may report findings but may not mutate the subject session']}); const packet=await workflow.handoffPacket(handoff.id); const receipt=await interop.send(a.reviewerProvider as ProviderId,a.reviewerNativeId,`Review work ${a.workId}. Treat this structured handoff as historical context, not ground truth. Verify claims against the repository. Handoff packet: ${JSON.stringify(packet)}. Detailed diff evidence is addressable as ${evidence.id}; request it with evidence_get when needed instead of assuming omitted content.`); return {handoff,packet,evidence:{id:evidence.id,contentHash:evidence.contentHash,kind:evidence.kind,trust:evidence.trust,summary:evidence.summary},receipt}; }));
+  write('work_verify','Run all accepted verification commands (max 8) inside an explicit or provider-verified workspace. Requires INTEROP_ALLOW_VERIFICATION=1.',{workId:z.string(),cwd:z.string().optional(),commands:z.array(verificationCommand).min(1).max(8)},(a)=>withWorkflow(async()=>{ if (process.env.INTEROP_ALLOW_VERIFICATION !== '1') throw new Error('Verification is disabled by default; set INTEROP_ALLOW_VERIFICATION=1 only for a trusted local MCP client'); let cwd=a.cwd as string|undefined; if (!cwd) { const work=await workflow.getWork(a.workId); const owner=work?.destinationSession ?? work?.sourceSession; if (owner) { const sessions=await interop.listSessions(); cwd=sessions.find((session)=>`${session.provider}:${session.nativeId}`===owner)?.cwd; } } if (!cwd) throw new Error('Verification requires an explicit cwd or a work item linked to a native session with a verified workspace'); return workflow.verify(a.workId,cwd,a.commands); }));
   return s; }
 export async function runStdio(){const runtime=await detectRuntime();const profile=activeProfile();const server=createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile);const cleanup=()=>runtime.dispose?.();process.once('SIGINT',cleanup);process.once('SIGTERM',cleanup);process.once('exit',cleanup);await server.connect(new StdioServerTransport());}
 function isLoopback(host: string): boolean { return host === '127.0.0.1' || host === 'localhost' || host === '::1'; }
 function authorized(req: IncomingMessage): boolean {
-  const expected = process.env.FREEBUFF_MCP_TOKEN;
+  const expected = process.env.AGENT_INTEROP_HTTP_TOKEN ?? process.env.FREEBUFF_MCP_TOKEN;
   if (!expected) return false;
   const supplied = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
   const a = Buffer.from(supplied); const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 }
-function validOrigin(req: IncomingMessage): boolean { const origin = req.headers.origin; if (!origin) return true; const allowed = new Set((process.env.FREEBUFF_MCP_ALLOWED_ORIGINS ?? 'http://127.0.0.1,http://localhost').split(',').map((value) => value.trim()).filter(Boolean)); try { return allowed.has(new URL(origin).origin); } catch { return false; } }
+function validOrigin(req: IncomingMessage): boolean { const origin = req.headers.origin; if (!origin) return true; const allowed = new Set((process.env.AGENT_INTEROP_HTTP_ALLOWED_ORIGINS ?? process.env.FREEBUFF_MCP_ALLOWED_ORIGINS ?? 'http://127.0.0.1,http://localhost').split(',').map((value) => value.trim()).filter(Boolean)); try { return allowed.has(new URL(origin).origin); } catch { return false; } }
 async function body(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -110,9 +134,11 @@ async function body(req: IncomingMessage): Promise<unknown> {
 export async function runHttp(): Promise<void> {
   const runtime = await detectRuntime();
   const profile = activeProfile();
-  const host = process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
-  const port = Number(process.env.FREEBUFF_MCP_PORT ?? 8788);
-  if (!isLoopback(host) && process.env.FREEBUFF_MCP_ALLOW_REMOTE !== '1') throw new Error('Refusing non-loopback HTTP host; set FREEBUFF_MCP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
+  const backend = createBackend(runtime);
+  const host = process.env.AGENT_INTEROP_HTTP_HOST ?? process.env.FREEBUFF_MCP_HOST ?? '127.0.0.1';
+  const port = Number(process.env.AGENT_INTEROP_HTTP_PORT ?? process.env.FREEBUFF_MCP_PORT ?? 8788);
+  const allowRemote = process.env.AGENT_INTEROP_HTTP_ALLOW_REMOTE ?? process.env.FREEBUFF_MCP_ALLOW_REMOTE;
+  if (!isLoopback(host) && allowRemote !== '1') throw new Error('Refusing non-loopback HTTP host; set AGENT_INTEROP_HTTP_ALLOW_REMOTE=1 only behind trusted HTTPS and authentication.');
   const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport; lastSeen: number }>();
   const requestCounts = new Map<string, { started: number; count: number }>();
   const cleanupSessions = setInterval(() => { const cutoff = Date.now() - 30 * 60_000; for (const [id, session] of sessions) if (session.lastSeen < cutoff) { void session.transport.close(); void session.mcp.close(); sessions.delete(id); } }, 60_000); cleanupSessions.unref?.();
@@ -129,7 +155,7 @@ export async function runHttp(): Promise<void> {
       const parsed = await body(req);
       if (!session) {
         if (typeof sessionId === 'string' || !parsed || typeof parsed !== 'object' || (parsed as { method?: string }).method !== 'initialize') { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error:'mcp_session_required'})); return; }
-        const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile);
+        const mcp = createServer(runtime,process.env.INTEROP_READ_ONLY !== '1',profile,backend);
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessionclosed: (closedId) => { sessions.delete(closedId); } });
         await mcp.connect(transport);
         session = { mcp, transport, lastSeen: Date.now() };
@@ -142,7 +168,7 @@ export async function runHttp(): Promise<void> {
       if (!res.headersSent) { res.writeHead(400, {'content-type':'application/json'}); res.end(JSON.stringify({error: error instanceof Error ? error.message : 'invalid_request'})); }
     }
   });
-  const cleanup=()=>{ clearInterval(cleanupSessions); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
+  const cleanup=()=>{ clearInterval(cleanupSessions); backend.dispose(); runtime.dispose?.(); for (const session of sessions.values()) { void session.transport.close(); void session.mcp.close(); } sessions.clear(); }; server.once('close',cleanup); process.once('SIGINT',()=>{cleanup();server.close()}); process.once('SIGTERM',()=>{cleanup();server.close()}); process.once('exit',cleanup);
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => resolve()); });
-  console.error(`freebuff-mcp HTTP listening on http://${host}:${port}/mcp`);
+  console.error(`agent-interop-runtime HTTP listening on http://${host}:${port}/mcp`);
 }

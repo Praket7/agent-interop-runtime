@@ -42,13 +42,13 @@ test('profiles: default is full and identical to the pre-profile catalog', () =>
   assert.equal(parseProfile('FULL'), 'full');
 });
 
-test('profiles: core keeps unified provider control and work tools, omits legacy per-provider tools', () => {
+test('profiles: core keeps interop and coordination while omitting Freebuff-specific tools', () => {
   const names = toolNames(createServer(fakeRuntime(), true, 'core'));
-  for (const name of ['agent_send', 'agent_cancel', 'session_create', 'session_resume', 'permission_respond', 'session_set_model', 'session_set_reasoning', 'conversation_send', 'handoff_create', 'work_create', 'work_verify', 'review_create', 'review_request']) {
+  for (const name of ['list_agents', 'list_agent_sessions', 'conversation_read', 'work_get', 'agent_send', 'conversation_create', 'conversation_join', 'conversation_send', 'handoff_create', 'work_create', 'work_verify', 'review_create', 'review_request']) {
     assert.ok(names.includes(name), `core must keep ${name}`);
   }
-  for (const name of ['send_message', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning', 'conversation_create', 'conversation_join']) {
-    assert.equal(names.includes(name), false, `core must omit legacy tool ${name}`);
+  for (const name of ['list_projects', 'list_threads', 'read_project_file', 'send_message', 'stop_thread', 'resume_thread', 'set_model', 'set_reasoning']) {
+    assert.equal(names.includes(name), false, `core must omit Freebuff-specific tool ${name}`);
   }
 });
 
@@ -65,9 +65,7 @@ test('profiles: legacy = core + legacy-only, and every core tool exists in full'
 test('profiles: core catalog is smaller than full', () => {
   const coreBytes = catalogBytes(createServer(fakeRuntime(), true, 'core'));
   const fullBytes = catalogBytes(createServer(fakeRuntime(), true, 'full'));
-  // Core omits 7 of 44 tools (~16% of names/descriptions; raw zod shared defs make the byte
-  // delta look smaller than the converted-schema delta a host actually downloads).
-  assert.ok(coreBytes < fullBytes * 0.95, `core catalog (${coreBytes}B) should be smaller than full (${fullBytes}B)`);
+  assert.ok(coreBytes < fullBytes * 0.80, `core catalog (${coreBytes}B) should be materially smaller than full (${fullBytes}B)`);
 });
 
 test('profiles: read-only composes with profiles instead of being overridden', () => {
@@ -89,9 +87,22 @@ test('profiles: freebuff_status reports the active profile', async () => {
   assert.match(payload.toolsetProfileDescription, /Core:/);
 });
 
+test('profiles: minimal and freebuff expose purpose-built narrow surfaces', () => {
+  const minimal = toolNames(createServer(fakeRuntime(), true, 'minimal'));
+  assert.ok(minimal.includes('list_agent_sessions'));
+  assert.ok(minimal.includes('agent_send'));
+  assert.equal(minimal.includes('work_get'), false);
+  assert.equal(minimal.includes('list_projects'), false);
+  const freebuff = toolNames(createServer(fakeRuntime(), true, 'freebuff'));
+  assert.ok(freebuff.includes('list_projects'));
+  assert.ok(freebuff.includes('send_message'));
+  assert.equal(freebuff.includes('agent_send'), false);
+  assert.equal(freebuff.includes('work_get'), false);
+});
+
 test('profiles: unknown profile names are rejected with supported values', () => {
-  assert.throws(() => parseProfile('turbo'), /Supported profiles: core, legacy, full/);
-  assert.deepEqual([...PROFILE_IDS], ['core', 'legacy', 'full']);
+  assert.throws(() => parseProfile('turbo'), /Supported profiles: minimal, core, freebuff, legacy, full/);
+  assert.deepEqual([...PROFILE_IDS], ['minimal', 'core', 'freebuff', 'legacy', 'full']);
 });
 
 test('profiles: INTEROP_TOOLS_PROFILE env selects the catalog', () => {

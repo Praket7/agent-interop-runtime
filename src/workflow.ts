@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Json } from './types.js';
 import type { AgentSession, WorkGraphSnapshot } from './interop.js';
 import { runVerification, type VerificationResult, type VerificationCommands } from './verification.js';
@@ -19,6 +19,8 @@ export interface Evidence {
   capturedAt: string;
   summary: string;
   data: Json;
+  /** Stable digest of the evidence payload/provenance for compact cross-agent references. */
+  contentHash?: string;
 }
 
 export interface WorkRecord {
@@ -32,8 +34,23 @@ export interface WorkRecord {
   risks: string[];
   unresolvedQuestions: string[];
   evidenceIds: string[];
+  /** Work graph dependencies that must remain visible across agent handoffs. */
+  dependsOn?: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ResourceClaim {
+  id: string;
+  workId: string;
+  sessionId: string;
+  resource: string;
+  kind: 'file' | 'directory' | 'interface' | 'workspace';
+  mode: 'exclusive' | 'shared_read';
+  status: 'active' | 'released' | 'expired';
+  acquiredAt: string;
+  expiresAt: string;
+  releasedAt?: string;
 }
 
 export interface Handoff {
@@ -48,7 +65,13 @@ export interface Handoff {
   risks: string[];
   unresolvedQuestions: string[];
   authorityBoundaries: string[];
-  status: 'created' | 'accepted' | 'completed' | 'blocked';
+  continuationState?: 'not_started' | 'in_progress' | 'needs_completion' | 'likely_complete' | 'existing_behavior_broken';
+  latestValidation?: { label?: string; command?: string; outcome: 'passed' | 'failed' | 'unknown'; observedAt?: string };
+  assumptions?: string[];
+  rollbackNotes?: string[];
+  nextAction?: string;
+  repositoryRevision?: string;
+  status: 'created' | 'accepted' | 'applied' | 'verified' | 'completed' | 'blocked' | 'superseded';
   /**
    * Token-budget accounting (audit §7 bounded handoff packet): the durable record keeps
    * every field (never silently loses constraints), and `contextTokens`/`omittedFields`
@@ -87,6 +110,12 @@ export interface HandoffPacket {
   changedFiles?: string[];
   unresolvedQuestions?: string[];
   risks?: string[];
+  continuationState?: Handoff['continuationState'];
+  latestValidation?: Handoff['latestValidation'];
+  assumptions?: string[];
+  rollbackNotes?: string[];
+  nextAction?: string;
+  repositoryRevision?: string;
   omissions: Array<{ field: string; reason: string }>;
   contextTokens: number;
   tokenBudget: number;
@@ -97,8 +126,9 @@ export type WorkSummary = Omit<WorkRecord, 'objective' | 'acceptanceCriteria' | 
 export type EvidenceSummary = Omit<Evidence, 'data'> & { dataBytes: number };
 
 const now = () => new Date().toISOString();
-const id = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+const id = (prefix: string) => `${prefix}_${randomUUID()}`;
 const json = (value: unknown): Json => JSON.parse(JSON.stringify(value ?? null)) as Json;
+const evidenceHash = (value: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Structured verification entries (AI-08): no whitespace splitting, quoted args preserved. */
 export interface VerificationRequest { executable: string; args?: string[]; cwd?: string; label?: string }
@@ -109,6 +139,7 @@ export class WorkflowStore {
   private evidence = new Map<string, Evidence>();
   private handoffs = new Map<string, Handoff>();
   private reviews = new Map<string, Review>();
+  private claims = new Map<string, ResourceClaim>();
   private recovery?: { required: true; file: string; preservedFile?: string; reason: string };
   private loaded = false;
   constructor(private readonly file?: string) {}
@@ -132,11 +163,29 @@ export class WorkflowStore {
 
   recoveryStatus(): { required: true; file: string; preservedFile?: string; reason: string } | null { return this.recovery ?? null; }
 
+  /** AIR-17: read paths refresh from the authoritative file so a long-lived MCP process
+   * observes work/evidence/handoffs written by another process. This is intentionally kept
+   * separate from load(): nested write transactions must not replace uncommitted in-memory
+   * changes before the outer transaction persists them. */
+  private async refreshForRead(): Promise<void> {
+    await this.load();
+    if (!this.file) return;
+    try {
+      const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Record<string, unknown>;
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+      this.adopt(raw);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+    }
+  }
+
   private adopt(raw: Record<string, unknown>): void {
     for (const item of Array.isArray(raw.works) ? raw.works : []) { const w = item as WorkRecord; if (w?.id) this.works.set(w.id, w); }
     for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) { const e = item as Evidence; if (e?.id) this.evidence.set(e.id, e); }
     for (const item of Array.isArray(raw.handoffs) ? raw.handoffs : []) { const h = item as Handoff; if (h?.id) this.handoffs.set(h.id, h); }
     for (const item of Array.isArray(raw.reviews) ? raw.reviews : []) { const r = item as Review; if (r?.id) this.reviews.set(r.id, r); }
+    for (const item of Array.isArray(raw.claims) ? raw.claims : []) { const claim = item as ResourceClaim; if (claim?.id) this.claims.set(claim.id, claim); }
   }
 
   private async transact<T>(fn: () => T): Promise<T> {
@@ -147,30 +196,31 @@ export class WorkflowStore {
       // Read current on-disk state inside the lock so parallel writers never lose records (AI-10).
       try { this.adopt(JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const result = fn();
-      const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()] };
+      const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
       await atomicWriteJson(file, value);
       return result;
     });
   }
 
-  private snapshot(): { works: WorkRecord[]; evidence: Evidence[]; handoffs: Handoff[]; reviews: Review[] } {
-    return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()] };
+  private snapshot(): { works: WorkRecord[]; evidence: Evidence[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] } {
+    return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
   }
 
-  async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions'>>): Promise<WorkRecord> {
+  async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions' | 'dependsOn'>>): Promise<WorkRecord> {
     return this.transact(() => {
+      for (const dependency of input.dependsOn ?? []) if (!this.works.has(dependency)) throw new Error(`Unknown dependency work ${dependency}`);
       const stamp = now();
-      const work: WorkRecord = { id: id('work'), objective: input.objective, acceptanceCriteria: input.acceptanceCriteria, sourceSession: input.sourceSession, status: 'open', changedFiles: [], risks: input.risks ?? [], unresolvedQuestions: input.unresolvedQuestions ?? [], evidenceIds: [], createdAt: stamp, updatedAt: stamp };
+      const work: WorkRecord = { id: id('work'), objective: input.objective, acceptanceCriteria: input.acceptanceCriteria, sourceSession: input.sourceSession, status: 'open', changedFiles: [], risks: input.risks ?? [], unresolvedQuestions: input.unresolvedQuestions ?? [], evidenceIds: [], dependsOn: input.dependsOn ?? [], createdAt: stamp, updatedAt: stamp };
       this.works.set(work.id, work);
       return work;
     });
   }
 
-  async getWork(workId: string): Promise<WorkRecord | null> { await this.load(); return this.works.get(workId) ?? null; }
+  async getWork(workId: string): Promise<WorkRecord | null> { await this.refreshForRead(); return this.works.get(workId) ?? null; }
 
   /** Metadata-only list (token efficiency): previews instead of full objectives and criteria. */
   async listWorks(): Promise<WorkSummary[]> {
-    await this.load();
+    await this.refreshForRead();
     return [...this.works.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((work) => {
       const { objective, acceptanceCriteria, risks, unresolvedQuestions, ...rest } = work;
       void risks; void unresolvedQuestions;
@@ -178,27 +228,75 @@ export class WorkflowStore {
     });
   }
 
-  async addEvidence(input: Omit<Evidence, 'id' | 'capturedAt'>): Promise<Evidence> {
+  async addEvidence(input: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): Promise<Evidence> {
     return this.transact(() => {
-      const evidence: Evidence = { ...input, id: id('evidence'), capturedAt: now(), data: json(input.data) };
+      if (input.workId && !this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      const normalized = { ...input, data: json(input.data) };
+      const evidence: Evidence = { ...normalized, id: id('evidence'), capturedAt: now(), contentHash: evidenceHash(normalized) };
       this.evidence.set(evidence.id, evidence);
       if (input.workId) {
-        const work = this.works.get(input.workId);
-        if (work && !work.evidenceIds.includes(evidence.id)) { work.evidenceIds.push(evidence.id); work.updatedAt = evidence.capturedAt; }
+        const work = this.works.get(input.workId)!;
+        if (!work.evidenceIds.includes(evidence.id)) { work.evidenceIds.push(evidence.id); work.updatedAt = evidence.capturedAt; }
       }
       return evidence;
     });
   }
 
-  async listEvidence(workId?: string): Promise<Evidence[]> { await this.load(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
+  async getEvidence(evidenceId: string): Promise<Evidence | null> { await this.refreshForRead(); return this.evidence.get(evidenceId) ?? null; }
+
+  async listEvidence(workId?: string): Promise<Evidence[]> { await this.refreshForRead(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
 
   /** Metadata-only evidence list: contents are addressable by ID, not re-returned in bulk. */
   async listEvidenceSummaries(workId?: string): Promise<EvidenceSummary[]> {
     return (await this.listEvidence(workId)).map(({ data, ...rest }) => ({ ...rest, dataBytes: JSON.stringify(data ?? null).length }));
   }
 
+  async claimResource(input: { workId: string; sessionId: string; resource: string; kind?: ResourceClaim['kind']; mode?: ResourceClaim['mode']; ttlSeconds?: number }): Promise<ResourceClaim> {
+    return this.transact(() => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      const resource = normalizeResource(input.resource);
+      if (!resource) throw new Error('Resource claim must name a file, directory, interface, or workspace');
+      const kind = input.kind ?? 'file';
+      const mode = input.mode ?? 'exclusive';
+      const nowMs = Date.now();
+      for (const claim of this.claims.values()) if (claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs) claim.status = 'expired';
+      const existing = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.workId === input.workId && claim.sessionId === input.sessionId && claim.kind === kind && claim.mode === mode && claim.resource === resource);
+      if (existing) return existing;
+      const conflict = [...this.claims.values()].find((claim) =>
+        claim.status === 'active'
+        && claim.sessionId !== input.sessionId
+        && (mode === 'exclusive' || claim.mode === 'exclusive')
+        && resourcesOverlap({ resource, kind }, claim)
+      );
+      if (conflict) throw new Error(`Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`);
+      const ttlSeconds = Math.min(3600, Math.max(30, Math.floor(input.ttlSeconds ?? 600)));
+      const acquiredAt = now();
+      const claim: ResourceClaim = { id: id('claim'), workId: input.workId, sessionId: input.sessionId, resource, kind, mode, status: 'active', acquiredAt, expiresAt: new Date(nowMs + ttlSeconds * 1000).toISOString() };
+      this.claims.set(claim.id, claim);
+      return claim;
+    });
+  }
+
+  async releaseClaim(claimId: string, sessionId?: string): Promise<ResourceClaim> {
+    return this.transact(() => {
+      const claim = this.claims.get(claimId);
+      if (!claim) throw new Error(`Unknown claim ${claimId}`);
+      if (sessionId && claim.sessionId !== sessionId) throw new Error(`Claim ${claimId} belongs to ${claim.sessionId}, not ${sessionId}`);
+      if (claim.status === 'active') { claim.status = 'released'; claim.releasedAt = now(); }
+      return claim;
+    });
+  }
+
+  async listClaims(workId?: string, activeOnly = false): Promise<ResourceClaim[]> {
+    await this.refreshForRead();
+    const nowMs = Date.now();
+    return [...this.claims.values()].map((claim) => claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs ? { ...claim, status: 'expired' as const } : claim).filter((claim) => (!workId || claim.workId === workId) && (!activeOnly || claim.status === 'active'));
+  }
+
   async createHandoff(input: Omit<Handoff, 'id' | 'createdAt' | 'status' | 'contextTokens' | 'tokenBudget' | 'omittedFields'>): Promise<Handoff> {
     return this.transact(async () => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      for (const evidenceId of input.evidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for handoff ${input.workId}`);
       const budget = parseTokenBudget();
       // AIR-05: the budget applies to the COMPLETE serialized delivery packet (routing
       // metadata, field names, omission explanations, and accounting included), measured
@@ -211,11 +309,17 @@ export class WorkflowStore {
         acceptanceCriteria: input.acceptanceCriteria,
         authorityBoundaries: input.authorityBoundaries,
       };
-      const optional: Array<{ name: 'evidenceIds' | 'changedFiles' | 'unresolvedQuestions' | 'risks'; value: string[] }> = [
+      const optional: Array<{ name: string; value: unknown }> = [
         { name: 'evidenceIds', value: input.evidenceIds },
         { name: 'changedFiles', value: input.changedFiles },
         { name: 'unresolvedQuestions', value: input.unresolvedQuestions },
         { name: 'risks', value: input.risks },
+        ...(input.continuationState ? [{ name: 'continuationState', value: input.continuationState }] : []),
+        ...(input.latestValidation ? [{ name: 'latestValidation', value: input.latestValidation }] : []),
+        ...(input.assumptions?.length ? [{ name: 'assumptions', value: input.assumptions }] : []),
+        ...(input.rollbackNotes?.length ? [{ name: 'rollbackNotes', value: input.rollbackNotes }] : []),
+        ...(input.nextAction ? [{ name: 'nextAction', value: input.nextAction }] : []),
+        ...(input.repositoryRevision ? [{ name: 'repositoryRevision', value: input.repositoryRevision }] : []),
       ];
       // Collision-resistant ID with a FIXED length (randomUUID is always 36 chars): no two
       // handoffs — even in the same millisecond — share an ID, and the serialized packet
@@ -294,7 +398,7 @@ export class WorkflowStore {
    * recipient knows data exists and how to request it.
    */
   async handoffPacket(handoffId: string): Promise<HandoffPacket> {
-    await this.load();
+    await this.refreshForRead();
     const handoff = this.handoffs.get(handoffId);
     if (!handoff) throw new Error(`Unknown handoff ${handoffId}`);
     const full: Record<string, unknown> = {
@@ -305,6 +409,12 @@ export class WorkflowStore {
       changedFiles: handoff.changedFiles,
       unresolvedQuestions: handoff.unresolvedQuestions,
       risks: handoff.risks,
+      continuationState: handoff.continuationState,
+      latestValidation: handoff.latestValidation,
+      assumptions: handoff.assumptions,
+      rollbackNotes: handoff.rollbackNotes,
+      nextAction: handoff.nextAction,
+      repositoryRevision: handoff.repositoryRevision,
     };
     const packet: HandoffPacket = { handoffId: handoff.id, workId: handoff.workId, sourceSession: handoff.sourceSession, ...(handoff.destinationSession ? { destinationSession: handoff.destinationSession } : {}), omissions: [], contextTokens: handoff.contextTokens, tokenBudget: handoff.tokenBudget, tokenizer: TOKENIZER_NAME };
     for (const name of handoff.omittedFields) packet.omissions.push({ field: name, reason: `exceeds ${handoff.tokenBudget}-token handoff budget; request field explicitly from work ${handoff.workId}` });
@@ -312,7 +422,20 @@ export class WorkflowStore {
     return packet;
   }
 
-  async listHandoffs(workId?: string): Promise<Handoff[]> { await this.load(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
+  async listHandoffs(workId?: string): Promise<Handoff[]> { await this.refreshForRead(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
+
+  async updateHandoffStatus(handoffId: string, status: Handoff['status']): Promise<Handoff> {
+    return this.transact(() => {
+      const handoff = this.handoffs.get(handoffId);
+      if (!handoff) throw new Error(`Unknown handoff ${handoffId}`);
+      const allowed: Record<Handoff['status'], Handoff['status'][]> = {
+        created: ['accepted','blocked','superseded'], accepted: ['applied','blocked','superseded'], applied: ['verified','blocked','superseded'], verified: ['completed','blocked','superseded'], completed: [], blocked: ['accepted','superseded'], superseded: [],
+      };
+      if (handoff.status !== status && !allowed[handoff.status].includes(status)) throw new Error(`Invalid handoff transition ${handoff.status} -> ${status}`);
+      handoff.status = status;
+      return handoff;
+    });
+  }
 
   /**
    * AI-R1: caller-submitted reviews are recorded as agent_claim, never provider_observed.
@@ -321,6 +444,8 @@ export class WorkflowStore {
   async createReview(input: Omit<Review, 'id' | 'createdAt' | 'provenance'> & { provenance?: 'agent_claim' | 'provider_observed' }): Promise<Review> {
     const provenance = input.provenance ?? 'agent_claim';
     return this.transact(async () => {
+      if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
+      for (const evidenceId of input.subjectEvidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for review ${input.workId}`);
       const review: Review = { ...input, provenance, id: id('review'), createdAt: now() };
       this.reviews.set(review.id, review);
       await this.addEvidence({
@@ -334,7 +459,7 @@ export class WorkflowStore {
     });
   }
 
-  async listReviews(workId?: string): Promise<Review[]> { await this.load(); return [...this.reviews.values()].filter((r) => !workId || r.workId === workId); }
+  async listReviews(workId?: string): Promise<Review[]> { await this.refreshForRead(); return [...this.reviews.values()].filter((r) => !workId || r.workId === workId); }
 
   /**
    * AI-08: every accepted command runs; input beyond the documented limit is rejected before
@@ -368,13 +493,15 @@ export class WorkflowStore {
     });
   }
 
-  async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[] }> {
-    await this.load();
+  async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] }> {
+    await this.refreshForRead();
     const snap = this.snapshot();
     const edges: WorkGraphSnapshot['edges'] = snap.evidence.filter((e) => e.workId).map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
     for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
     for (const review of snap.reviews) edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
-    return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews };
+    for (const work of snap.works) for (const dependency of work.dependsOn ?? []) edges.push({ from: work.id, to: dependency, kind: 'depends_on' });
+    for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'claims' });
+    return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews, claims: snap.claims };
   }
 }
 
@@ -392,4 +519,15 @@ function parseTokenBudget(): number {
   const parsed = raw === undefined ? NaN : Number(raw);
   if (Number.isFinite(parsed) && parsed >= 100) return Math.floor(parsed);
   return 2_000;
+}
+
+function normalizeResource(value: string): string { return value.trim().replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, ''); }
+function resourcesOverlap(a: { resource: string; kind: ResourceClaim['kind'] }, b: { resource: string; kind: ResourceClaim['kind'] }): boolean {
+  const ar = normalizeResource(a.resource); const br = normalizeResource(b.resource);
+  if (a.kind === 'workspace' || b.kind === 'workspace') return ar === br;
+  if (a.kind === 'interface' || b.kind === 'interface') return a.kind === b.kind && ar === br;
+  if (a.kind === 'file' && b.kind === 'file') return ar === br;
+  const aPrefix = a.kind === 'directory' ? `${ar}/` : ar;
+  const bPrefix = b.kind === 'directory' ? `${br}/` : br;
+  return ar === br || (a.kind === 'directory' && br.startsWith(aPrefix)) || (b.kind === 'directory' && ar.startsWith(bPrefix));
 }

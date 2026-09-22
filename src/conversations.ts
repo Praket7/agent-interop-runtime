@@ -16,6 +16,8 @@ export interface ConversationMessage {
   /** Set when the provider may or may not have executed the prompt; such records are never silently resent. */
   deliveryUnknownAt?: string;
   idempotencyKey?: string;
+  /** Durable cross-process dispatch lease. Reconciliation never reclassifies a live lease. */
+  dispatchLease?: { id: string; startedAt: string; expiresAt: string };
 }
 export interface Conversation { id: string; title: string; participants: ConversationParticipant[]; messages: ConversationMessage[]; createdAt: string; updatedAt: string; /** Highest sequence ever assigned, persisted so monotonic cursors survive restart and trimming. */ lastSequence: number; }
 export type ConversationSummary = Omit<Conversation, 'messages'> & { messageCount: number };
@@ -120,7 +122,10 @@ export class ConversationStore {
     return this.transact(() => {
       const conversation = this.require(conversationId);
       const existing = conversation.participants.find((value) => value.provider === participant.provider && value.nativeId === participant.nativeId);
-      if (!existing) conversation.participants.push({ ...participant, id: participant.id ?? `${participant.provider}:${participant.nativeId}` });
+      const participantId = participant.id ?? `${participant.provider}:${participant.nativeId}`;
+      const idCollision = conversation.participants.find((value) => value.id === participantId && (value.provider !== participant.provider || value.nativeId !== participant.nativeId));
+      if (idCollision) throw new Error(`Participant ID '${participantId}' is already bound to ${idCollision.provider}:${idCollision.nativeId}`);
+      if (!existing) conversation.participants.push({ ...participant, id: participantId });
       conversation.updatedAt = stamp();
       return clone(conversation);
     });
@@ -142,31 +147,33 @@ export class ConversationStore {
     // Idempotency: a caller may supply a stable key (e.g. derived from work ID + handoff ID)
     // so a crashed/retried send resolves to the SAME message record instead of enqueueing a
     // duplicate. Without it, a fresh key is minted per call.
+    const trimmedText = text.trim();
+    if (!trimmedText) throw new Error('Conversation message text must not be blank');
     const idempotencyKey = callerIdempotencyKey?.trim() || newId('outbound');
-    if (callerIdempotencyKey?.trim()) {
-      await this.ensureLoaded();
-      const duplicate = [...this.conversations.values()].flatMap((c) => c.messages).find((m) => m.idempotencyKey === idempotencyKey);
-      if (duplicate) {
-        throw new Error(`Idempotency key '${idempotencyKey}' already has a message (${duplicate.id}, delivery ${duplicate.delivery}). Inspect the existing record instead of resending.`);
-      }
-    }
-    const destination = await this.resolveDestination(conversationId, recipient);
-    const pending = await this.transact(() => {
+    // AIR-16: uniqueness is checked INSIDE the same state-lock transaction that creates the
+    // outbound record. Two processes using the same caller key can no longer both pass a
+    // stale preflight check and enqueue duplicate provider work.
+    const { pending, destination } = await this.transact(() => {
+      const duplicate = [...this.conversations.values()].flatMap((value) => value.messages).find((message) => message.idempotencyKey === idempotencyKey);
+      if (duplicate) throw new Error(`Idempotency key '${idempotencyKey}' already has a message (${duplicate.id}, delivery ${duplicate.delivery}). Inspect the existing record instead of resending.`);
       const conversation = this.require(conversationId);
       if (!conversation.participants.some((value) => value.id === sender)) throw new Error(`Unknown conversation sender ${sender}`);
       const destinationParticipant = conversation.participants.find((value) => value.id === recipient);
       if (!destinationParticipant) throw new Error(`Unknown conversation recipient ${recipient}`);
+      if (replyTo && !conversation.messages.some((value) => value.id === replyTo)) throw new Error(`Unknown reply target ${replyTo} in conversation ${conversationId}`);
+      const leaseStarted = stamp();
       const message: ConversationMessage = {
-        id: newId('message'), conversationId, sender, recipient, text: text.trim(),
-        ...(replyTo ? { replyTo } : {}), createdAt: stamp(),
+        id: newId('message'), conversationId, sender, recipient, text: trimmedText,
+        ...(replyTo ? { replyTo } : {}), createdAt: leaseStarted,
         sequence: conversation.lastSequence + 1,
         delivery: 'queued', idempotencyKey,
+        dispatchLease: { id: newId('dispatch'), startedAt: leaseStarted, expiresAt: new Date(Date.now() + 120_000).toISOString() },
       };
       conversation.lastSequence = message.sequence;
       conversation.messages.push(message);
       if (conversation.messages.length > MAX_MESSAGES_PER_CONVERSATION) conversation.messages.splice(0, conversation.messages.length - MAX_MESSAGES_PER_CONVERSATION);
-      conversation.updatedAt = stamp();
-      return clone(message);
+      conversation.updatedAt = leaseStarted;
+      return { pending: clone(message), destination: { provider: destinationParticipant.provider, nativeId: destinationParticipant.nativeId } };
     });
     const provider = destination.provider;
     const nativeId = destination.nativeId;
@@ -176,9 +183,12 @@ export class ConversationStore {
     // Blocker 3: mark the dispatch window so reconciliation treats the queued record as
     // healthy in-flight work, not a crash, while the provider call is executing.
     this.markDispatchStarted(pending.id);
+    const leaseTimer = setInterval(() => { void this.renewDispatchLease(pending.id, pending.dispatchLease?.id); }, 30_000);
+    leaseTimer.unref?.();
     try {
       receipt = await registry.send(provider, nativeId, envelope, 'send', options);
     } catch (error) {
+      clearInterval(leaseTimer);
       this.markDispatchFinished(pending.id);
       const reason = error instanceof Error ? error.message : String(error);
       // Provider never confirmed receipt: delivery outcome is unknown, not failed-and-resendable.
@@ -188,18 +198,20 @@ export class ConversationStore {
         if (message) {
           message.delivery = 'delivery_unknown';
           message.deliveryUnknownAt = stamp();
+          delete message.dispatchLease;
           message.receipt = { provider, nativeId, operation: 'send', accepted: false, status: 'rejected', detail: { reason, classification: 'delivery_unknown' } };
         }
         return null;
       });
       throw new Error(`Message ${pending.id} persisted with delivery_unknown; it may have reached the provider and must not be resent blindly: ${reason}`);
     }
+    clearInterval(leaseTimer);
     this.markDispatchFinished(pending.id);
     const delivery: DeliveryState = receipt.accepted ? (receipt.status === 'completed' ? 'completed' : 'queued') : 'rejected';
     await this.transact(() => {
       const conversation = this.require(conversationId);
       const message = conversation.messages.find((m) => m.id === pending.id);
-      if (message) { message.receipt = receipt; message.delivery = delivery; }
+      if (message) { message.receipt = receipt; message.delivery = delivery; delete message.dispatchLease; }
       return null;
     });
     return { message: clone({ ...pending, receipt, delivery }), receipt: clone(receipt) };
@@ -301,7 +313,8 @@ export class ConversationStore {
         // exactly what reconciliation assigns; if the original dispatch later completes, its
         // receipt transaction overwrites the classification (send() writes the receipt for
         // its own message ID unconditionally on return).
-        if (previousDelivery === 'queued' && this.inFlightDispatches.has(message.id)) { skippedInFlight.add(message.id); continue; }
+        const leaseActive = previousDelivery === 'queued' && message.dispatchLease && Date.parse(message.dispatchLease.expiresAt) > Date.now();
+        if (previousDelivery === 'queued' && (this.inFlightDispatches.has(message.id) || leaseActive)) { skippedInFlight.add(message.id); continue; }
         const observed = receipts.get(message.idempotencyKey ?? '');
         if (observed) {
           message.receipt = observed;
@@ -312,6 +325,7 @@ export class ConversationStore {
           // executed the prompt. Reclassify honestly; never resend automatically.
           message.delivery = 'delivery_unknown';
           message.deliveryUnknownAt = stamp();
+          delete message.dispatchLease;
         }
         // delivery_unknown without an observed receipt stays delivery_unknown (unchanged;
         // resolved stays false).
@@ -331,6 +345,20 @@ export class ConversationStore {
       }
     }
     return out;
+  }
+
+  private async renewDispatchLease(messageId: string, leaseId?: string): Promise<void> {
+    if (!leaseId) return;
+    await this.transact(() => {
+      for (const conversation of this.conversations.values()) {
+        const message = conversation.messages.find((value) => value.id === messageId);
+        if (!message || message.delivery !== 'queued' || message.dispatchLease?.id !== leaseId) continue;
+        message.dispatchLease.expiresAt = new Date(Date.now() + 120_000).toISOString();
+        conversation.updatedAt = stamp();
+        break;
+      }
+      return null;
+    });
   }
 
   /** In-flight dispatch markers: message IDs whose provider call is currently executing in

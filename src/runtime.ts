@@ -94,7 +94,7 @@ type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshnes
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  if (host === '::1' || host === '::') return true;
+  if (host === '::1') return true;
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
   return false;
 }
@@ -221,14 +221,14 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
     seen.add(candidate.url);
     try {
       assertLoopbackCandidateUrl(candidate.url); // AI-15: re-validate at the fetch boundary.
-      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}), redirect: 'error' };
-      let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) };
+      let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
       if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 404)) {
         const refreshed = await refreshDesktopLaunchId(candidate.launchId);
         if (refreshed && refreshed !== candidate.launchId) {
           candidate.launchId = refreshed;
-          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed, redirect: 'error' };
-          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed };
+          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
         }
       }
       if (!response.ok) continue;
@@ -236,7 +236,7 @@ async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
         candidate.launchId = await refreshDesktopLaunchId();
         if (candidate.launchId) {
           headers = { ...headers, 'x-freebuff-launch-id': candidate.launchId };
-          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers });
+          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
           if (!response.ok) continue;
         }
       }

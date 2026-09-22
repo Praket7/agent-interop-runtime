@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+This release turns Agent Interop Runtime into a stronger coordination and reliability layer for heterogeneous native coding-agent sessions.
+
+- Make caller idempotency atomic across processes and add renewable durable dispatch leases so recovery cannot casually duplicate or misclassify live provider work.
+- Fix native permission request identity, provider event-stream restart behavior, cross-process workflow freshness, participant-ID collisions, redirect handling, IPv6 loopback classification, and remote OpenCode transport security.
+- Share one provider backend across HTTP MCP sessions instead of spawning independent native adapters per client.
+- Add capability-oriented `minimal`, `core`, `freebuff`, `legacy`, and `full` tool profiles that gate both reads and writes.
+- Add content-addressed evidence lookup, referential integrity for work/evidence/handoffs/reviews, work dependencies, resource claim leases, structured continuation metadata, and an explicit handoff lifecycle.
+- Keep review delivery within the handoff token budget by sending compact packets plus evidence references rather than duplicating full diffs.
+- Add reconnect-safe event pages with monotonic runtime cursors, epochs, and retention-gap metadata.
+- Constrain verification commands to a declared or provider-verified workspace and strip credential-shaped environment variables.
+- Restore executable cross-platform CI, align all release metadata, and add a catalog-size regression gate.
+
+Research informing the design included recent work on handoff debt, delegation reliability, explicit multi-agent coding coordination, structured communication, and transactional validation. Resource claims coordinate cooperative clients but do not sandbox arbitrary provider filesystem writes, and live provider interoperability remains dependent on installed/authenticated provider versions.
 ## 0.2.9
 
 This release refreshes Freebuff Desktop launch authorization after rejected requests and searches the documented local readiness and log locations for the current launch ID. Desktop writes remain disabled until the live header is accepted.

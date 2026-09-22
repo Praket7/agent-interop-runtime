@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, EvidenceRecord, OperationReceipt, ProviderId, WorkGraphSnapshot, AgentSendOptions, ModelSelection } from './interop.js';
 
 export interface EventConsumer { delivered: Set<number>; waiters: Array<(event: AgentEvent | null) => void> }
-export interface EventBuffer { history: AgentEvent[]; consumers: EventConsumer[]; closed?: boolean }
+export interface EventBuffer { history: AgentEvent[]; consumers: EventConsumer[]; epoch: number; closed?: boolean }
 const EVENT_BUFFER_MAX = 200;
 export function normalizeProviderId(provider: ProviderId, id: string): string { const prefix = `${provider}:`; return id.startsWith(prefix) ? id.slice(prefix.length) : id; }
 
@@ -14,10 +14,22 @@ export class InteropRegistry {
   private evidence: EvidenceRecord[] = [];
   /** AI-14: one shared bounded buffer per provider session, not a new subscription per read. */
   private readonly eventBuffers = new Map<string, EventBuffer>();
+  /** Registry-owned cursors survive provider stream reconnects even when native iterators reset. */
+  private readonly eventSequences = new Map<string, number>();
+  private readonly eventEpochs = new Map<string, number>();
   register(adapter: AgentAdapter) { this.adapters.set(adapter.id, adapter); return this; }
   listProviders(): ProviderId[] { return [...this.adapters.keys()]; }
   adapter(provider: ProviderId) { const value = this.adapters.get(provider); if (!value) throw new Error(`Unknown provider ${provider}`); return value; }
-  async capabilities(): Promise<AgentCapabilities[]> { return Promise.all([...this.adapters.values()].map((a) => a.capabilities())); }
+  async capabilities(): Promise<AgentCapabilities[]> {
+    return Promise.all([...this.adapters.values()].map(async (adapter) => {
+      try { return await adapter.capabilities(); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const unavailable = { supported: false, state: 'unavailable' as const, reason };
+        return { provider: adapter.id, adapterVersion: 'unknown', authorization: 'unknown' as const, discovery: unavailable, sessions: unavailable, sendMessage: unavailable, steer: unavailable, cancel: unavailable, events: unavailable, diff: unavailable, permissions: unavailable, model: unavailable, reasoning: unavailable, limitations: [`Capability probe failed: ${reason}`] };
+      }
+    }));
+  }
   async listSessions(provider?: ProviderId): Promise<AgentSession[]> { const run = this.discoveryQueue.then(async () => { this.sessionErrors = []; const adapters = provider ? [this.adapter(provider)] : [...this.adapters.values()]; const results = await Promise.all(adapters.map(async (adapter) => { try { return await adapter.listSessions(); } catch (error) { this.sessionErrors.push({ provider: adapter.id, error: error instanceof Error ? error.message : String(error) }); return []; } })); const sessions = results.flat(); for (const s of sessions) this.capture({ id: `${s.provider}:${s.nativeId}`, provider: s.provider, nativeId: s.nativeId, kind: 'session', capturedAt: new Date().toISOString(), trust: 'native', summary: s.title ?? 'Native session discovered', data: s as unknown as Json }); return sessions; }); this.discoveryQueue = run.then(() => undefined, () => undefined); return run; }
   getSessionErrors(): Array<{ provider: ProviderId; error: string }> { return [...this.sessionErrors]; }
   async send(provider: ProviderId, nativeId: string, text: string, mode: 'send' | 'steer' = 'send', options?: AgentSendOptions): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const adapter = this.adapter(provider); const fn = mode === 'steer' ? adapter.steer : adapter.send; if (!fn) throw new Error(`${provider} does not support ${mode}`); const result = await fn.call(adapter, nativeId, text, options); this.capture({ id: `${Date.now()}-${randomUUID()}`, provider, nativeId, kind: 'event', capturedAt: new Date().toISOString(), trust: 'observed', summary: `${mode} ${result.status ?? (result.accepted ? 'accepted' : 'rejected')}`, data: result.detail ?? null }); return result; }
@@ -43,9 +55,11 @@ export class InteropRegistry {
     const bufferKey = `${provider}:${nativeId}`;
     let buffer = this.eventBuffers.get(bufferKey);
     if (!buffer || buffer.closed) {
-      buffer = { history: [], consumers: [] };
+      const epoch = (this.eventEpochs.get(bufferKey) ?? 0) + 1;
+      this.eventEpochs.set(bufferKey, epoch);
+      buffer = { history: [], consumers: [], epoch };
       this.eventBuffers.set(bufferKey, buffer);
-      void this.pumpEvents(provider, nativeId, buffer);
+      void this.pumpEvents(provider, nativeId, bufferKey, buffer);
     }
     const boundedLimit = Math.max(1, Math.min(limit, 100));
     const consumer: EventConsumer = { delivered: new Set<number>(), waiters: [] };
@@ -83,19 +97,48 @@ export class InteropRegistry {
     return events;
   }
 
+  async readEventPage(provider: ProviderId, nativeId: string, limit = 50, timeoutMs = 5_000, afterSequence = 0): Promise<{ events: AgentEvent[]; next: number; oldestSequence?: number; latestSequence: number; epoch: number; gap?: { from: number; to: number }; streamClosed: boolean }> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const events = await this.readEvents(provider, nativeId, limit, timeoutMs, afterSequence);
+    const key = `${provider}:${nativeId}`;
+    const buffer = this.eventBuffers.get(key);
+    const oldestSequence = buffer?.history[0]?.sequence;
+    const latestSequence = this.eventSequences.get(key) ?? events.at(-1)?.sequence ?? afterSequence;
+    const next = events.at(-1)?.sequence ?? afterSequence;
+    return {
+      events,
+      next,
+      ...(oldestSequence !== undefined ? { oldestSequence } : {}),
+      latestSequence,
+      epoch: buffer?.epoch ?? this.eventEpochs.get(key) ?? 0,
+      ...(oldestSequence !== undefined && afterSequence + 1 < oldestSequence ? { gap: { from: afterSequence + 1, to: oldestSequence - 1 } } : {}),
+      streamClosed: buffer?.closed ?? true,
+    };
+  }
+
   /** Single background pump per provider session: adapter events fan out to all consumers. */
-  private async pumpEvents(provider: ProviderId, nativeId: string, buffer: EventBuffer): Promise<void> {
+  private async pumpEvents(provider: ProviderId, nativeId: string, bufferKey: string, buffer: EventBuffer): Promise<void> {
     try {
       const iterator = this.adapter(provider).events!(nativeId)[Symbol.asyncIterator]();
       for (;;) {
         if (buffer.closed) return;
         const next = await iterator.next();
         if (next.done || buffer.closed) return;
-        buffer.history.push(next.value);
+        const sequence = (this.eventSequences.get(bufferKey) ?? 0) + 1;
+        this.eventSequences.set(bufferKey, sequence);
+        const event: AgentEvent = { ...next.value, provider, nativeId, sequence };
+        buffer.history.push(event);
         if (buffer.history.length > EVENT_BUFFER_MAX) buffer.history.splice(0, buffer.history.length - EVENT_BUFFER_MAX);
-        for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(next.value);
+        for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(event);
       }
-    } catch { /* adapter stream ended or errored; the next readEvents recreates the buffer */ }
+    } catch {
+      // A provider stream is allowed to terminate or reconnect. The buffer MUST become
+      // closed so the next read creates a fresh native subscription instead of remaining
+      // attached forever to a dead iterator.
+    } finally {
+      buffer.closed = true;
+      for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(null);
+    }
   }
   /** Section 4 gap: surface pending provider permission requests for human visibility. */
   pendingPermissions(): Array<{ provider: ProviderId; requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> {
@@ -108,5 +151,5 @@ export class InteropRegistry {
   }
   capture(record: EvidenceRecord) { this.evidence.push(record); if (this.evidence.length > 1000) this.evidence.splice(0, this.evidence.length - 1000); }
   async graph(): Promise<WorkGraphSnapshot> { return { sessions: await this.listSessions(), edges: this.evidence.map((e) => ({ from: `${e.provider}:${e.nativeId}`, to: e.id, kind: 'evidence' as const })), evidence: [...this.evidence] }; }
-  dispose() { for (const adapter of this.adapters.values()) adapter.dispose?.(); for (const buffer of this.eventBuffers.values()) buffer.closed = true; this.eventBuffers.clear(); }
+  dispose() { for (const adapter of this.adapters.values()) adapter.dispose?.(); for (const buffer of this.eventBuffers.values()) buffer.closed = true; this.eventBuffers.clear(); this.eventSequences.clear(); this.eventEpochs.clear(); }
 }

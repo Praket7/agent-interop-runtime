@@ -1,34 +1,52 @@
 # Architecture
 
-Agent Interop Runtime has four layers.
-
-The provider layer speaks to native systems. Freebuff uses the preserved Desktop and managed PTY bridge. OpenCode uses its local HTTP server. Codex uses its App Server JSON RPC transport. Claude Code uses ACP over JSON RPC when the ACP command is available.
-
-The normalized layer preserves native identity while adding a global provider label. A global identifier never replaces a provider native identifier.
-
-The workflow layer stores work, evidence, handoffs, reviews, and verification results. State is persisted atomically in the user application data directory. A custom path can be selected with `INTEROP_STATE_FILE`.
-
-The MCP layer exposes compact discovery, control, observation, coordination, evidence, and permission tools. Unsupported operations fail clearly and are never emulated with terminal keystrokes.
-
-Evidence has explicit trust levels. Agent claims are weaker than provider observations. Runtime command results and direct repository inspection are recorded separately. The runtime never promotes one trust level silently.
+Agent Interop Runtime is a local coordination and reliability layer above native coding-agent transports. It preserves provider identity instead of pretending heterogeneous sessions are one generic transcript.
 
 ```mermaid
 flowchart LR
-  Client[MCP client] --> Northbound[Compact MCP surface]
-  Northbound --> Registry[Interop registry]
+  Client[MCP client] --> Surface[Capability-scoped MCP surface]
+  Surface --> Backend[Shared interop backend]
+  Backend --> Registry[Native provider registry]
   Registry --> Freebuff[Freebuff bridge]
-  Registry --> OpenCode[OpenCode HTTP server]
-  Registry --> Codex[Codex App Server JSON RPC]
-  Registry --> Claude[Claude ACP JSON RPC]
-  Registry --> Evidence[Durable evidence store]
-  Evidence --> Verify[Deterministic verifier]
-  Verify --> Git[Repository evidence]
+  Registry --> OpenCode[OpenCode HTTP]
+  Registry --> Codex[Codex App Server]
+  Registry --> Claude[Claude ACP]
+  Registry --> Cursor[Cursor ACP]
+  Backend --> Workflow[Durable work graph]
+  Workflow --> Claims[Resource claim leases]
+  Workflow --> Handoffs[Bounded structured handoffs]
+  Workflow --> Evidence[Content-addressed evidence]
+  Evidence --> Verify[Workspace-contained verification]
 ```
 
-## Recovery behavior
+## Provider and session identity
 
-Provider sessions retain their native identifiers. Native event streams are live observations and are not falsely replayed after a process restart. Durable work and evidence are written with a temporary file and rename so a process interruption cannot leave a partially written state file.
+Every session retains its provider-native identifier. The normalized identifier adds a provider namespace but never substitutes it when calling a provider. Capability probes degrade per provider so one unavailable adapter does not erase healthy sessions.
 
-## Authority boundaries
+HTTP MCP protocol sessions share one process-wide backend. Provider processes, event subscriptions, workflow state, and conversation state therefore remain coherent across multiple connected clients.
 
-Reviewers receive evidence and may return findings. A reviewer does not gain write access to the subject session through a review request. Remediation is sent to the exact originating session only when the caller explicitly chooses that native session.
+## Durable coordination
+
+The workflow store contains work items, dependency edges, evidence, reviews, handoffs, verification results, and resource claims. File-backed mutations use an inter-process lock and atomic replacement. Read paths refresh from disk so long-lived processes see writes made by peers.
+
+Resource claims are leases over files, directories, interfaces, or workspaces. The runtime atomically rejects conflicting exclusive claims. They are coordination primitives, not an operating-system filesystem sandbox: a provider that writes outside the Agent Interop protocol can still violate a claim.
+
+## Handoffs and evidence
+
+Handoffs preserve objective, acceptance criteria, and authority boundaries as mandatory fields. Optional continuation state, validation evidence, assumptions, rollback notes, changed files, risks, next action, evidence references, and repository revision are packed under the configured token budget with explicit omission records.
+
+Evidence is addressable by ID and includes a SHA-256 content hash. Trust levels distinguish caller claims, provider observations, runtime observations, repository verification, and human acceptance. Review requests carry bounded handoff packets plus evidence references instead of embedding unbounded diffs.
+
+The handoff lifecycle is explicit: `created → accepted → applied → verified → completed`, with `blocked` and `superseded` escape states.
+
+## Delivery and recovery
+
+Conversation messages are persisted before provider dispatch. Caller idempotency keys are checked inside the same locked transaction that creates a message. A durable dispatch lease is renewed while the provider call is active; another process will not classify a live leased message as interrupted. Unknown delivery outcomes are never blindly resent.
+
+Native event streams use a shared per-session pump. A terminated provider iterator closes its buffer so a later read opens a new subscription. `events_page` overlays a registry-owned monotonic cursor and reconnect epoch, avoiding provider sequence resets.
+
+## Verification and authority
+
+Verification is disabled unless `INTEROP_ALLOW_VERIFICATION=1`. Checks run without a shell, inside an explicit or provider-verified workspace; command-specific working directories cannot escape that root and credential-shaped environment variables are removed.
+
+String `authorityBoundaries` in a handoff remain explicit continuation constraints, not a claim that every provider action is intercepted. Resource claims are the first machine-enforced coordination boundary. Provider-native permissions remain provider/user controlled.
