@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
-      - run: |
+      - name: Probe hosted runner assignment
+        run: |
           echo "runner=${{ runner.name }}"
           echo "os=${{ runner.os }}"
           node --version || true
