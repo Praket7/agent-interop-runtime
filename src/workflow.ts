@@ -132,6 +132,23 @@ export class WorkflowStore {
 
   recoveryStatus(): { required: true; file: string; preservedFile?: string; reason: string } | null { return this.recovery ?? null; }
 
+  /** AIR-17: read paths refresh from the authoritative file so a long-lived MCP process
+   * observes work/evidence/handoffs written by another process. This is intentionally kept
+   * separate from load(): nested write transactions must not replace uncommitted in-memory
+   * changes before the outer transaction persists them. */
+  private async refreshForRead(): Promise<void> {
+    await this.load();
+    if (!this.file) return;
+    try {
+      const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Record<string, unknown>;
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear();
+      this.adopt(raw);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear();
+    }
+  }
+
   private adopt(raw: Record<string, unknown>): void {
     for (const item of Array.isArray(raw.works) ? raw.works : []) { const w = item as WorkRecord; if (w?.id) this.works.set(w.id, w); }
     for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) { const e = item as Evidence; if (e?.id) this.evidence.set(e.id, e); }
@@ -166,11 +183,11 @@ export class WorkflowStore {
     });
   }
 
-  async getWork(workId: string): Promise<WorkRecord | null> { await this.load(); return this.works.get(workId) ?? null; }
+  async getWork(workId: string): Promise<WorkRecord | null> { await this.refreshForRead(); return this.works.get(workId) ?? null; }
 
   /** Metadata-only list (token efficiency): previews instead of full objectives and criteria. */
   async listWorks(): Promise<WorkSummary[]> {
-    await this.load();
+    await this.refreshForRead();
     return [...this.works.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((work) => {
       const { objective, acceptanceCriteria, risks, unresolvedQuestions, ...rest } = work;
       void risks; void unresolvedQuestions;
@@ -190,7 +207,7 @@ export class WorkflowStore {
     });
   }
 
-  async listEvidence(workId?: string): Promise<Evidence[]> { await this.load(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
+  async listEvidence(workId?: string): Promise<Evidence[]> { await this.refreshForRead(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
 
   /** Metadata-only evidence list: contents are addressable by ID, not re-returned in bulk. */
   async listEvidenceSummaries(workId?: string): Promise<EvidenceSummary[]> {
@@ -294,7 +311,7 @@ export class WorkflowStore {
    * recipient knows data exists and how to request it.
    */
   async handoffPacket(handoffId: string): Promise<HandoffPacket> {
-    await this.load();
+    await this.refreshForRead();
     const handoff = this.handoffs.get(handoffId);
     if (!handoff) throw new Error(`Unknown handoff ${handoffId}`);
     const full: Record<string, unknown> = {
@@ -312,7 +329,7 @@ export class WorkflowStore {
     return packet;
   }
 
-  async listHandoffs(workId?: string): Promise<Handoff[]> { await this.load(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
+  async listHandoffs(workId?: string): Promise<Handoff[]> { await this.refreshForRead(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
 
   /**
    * AI-R1: caller-submitted reviews are recorded as agent_claim, never provider_observed.
@@ -334,7 +351,7 @@ export class WorkflowStore {
     });
   }
 
-  async listReviews(workId?: string): Promise<Review[]> { await this.load(); return [...this.reviews.values()].filter((r) => !workId || r.workId === workId); }
+  async listReviews(workId?: string): Promise<Review[]> { await this.refreshForRead(); return [...this.reviews.values()].filter((r) => !workId || r.workId === workId); }
 
   /**
    * AI-08: every accepted command runs; input beyond the documented limit is rejected before
@@ -369,7 +386,7 @@ export class WorkflowStore {
   }
 
   async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[] }> {
-    await this.load();
+    await this.refreshForRead();
     const snap = this.snapshot();
     const edges: WorkGraphSnapshot['edges'] = snap.evidence.filter((e) => e.workId).map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
     for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
