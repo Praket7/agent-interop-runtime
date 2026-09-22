@@ -23,6 +23,7 @@ const INTEROP_READS = [
 const COORDINATION_READS = [
   'get_work_graph',
   'evidence_list',
+  'evidence_get',
   'work_list',
   'work_get',
   'handoff_packet',
