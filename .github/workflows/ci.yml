@@ -37,4 +37,5 @@ jobs:
       - run: pnpm mcp:validate
       - run: pnpm schema:check
       - run: pnpm bench:check
+      - run: node -e "require('node:fs').mkdirSync('work', { recursive: true })"
       - run: pnpm pack --pack-destination work
