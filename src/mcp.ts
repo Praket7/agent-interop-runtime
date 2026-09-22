@@ -54,13 +54,10 @@ export function createServer(runtime: Runtime, includeWrites = true, profile: Pr
     s.close = async () => { try { activeBackend.dispose(); } finally { await originalClose(); } };
   }
   const withWorkflow = <T>(fn: () => Promise<T>) => ready.then(fn);
-  // Profile gate (audit backlog item 5): profiles trim only the write surface; read tools
-  // stay available in every profile. The default profile registers every write tool, so
-  // existing clients see no change. Read-only mode still strips mutation tools on top.
-  const enabledFor = (name: string) => {
-    if (!profileToolset('full').has(name)) return true; // read tools: never profile-gated
-    return includeWrites && profileToolset(profile).has(name);
-  };
+  // Capability profiles gate the entire catalog, including reads. MCP clients commonly
+  // serialize every visible tool schema into model context, so hiding irrelevant read tools
+  // is as important as hiding writes. Read-only mode still strips writes independently.
+  const enabledFor = (name: string) => profileToolset(profile).has(name);
   const read=(name:string,description:string,schema:Record<string,z.ZodType>,fn:(a:any)=>Promise<unknown>)=>{ if (!enabledFor(name)) return; s.registerTool(name,{description,inputSchema:schema,annotations:{readOnlyHint:true,openWorldHint:false}},async(a)=>({content:[{type:'text',text:JSON.stringify(await fn(a),null,2)}]})); };
   read('freebuff_status','Detect Freebuff and bridge capabilities.',{},()=>runtime.capabilities().then((caps)=>({ ...caps, toolsetProfile: profile, toolsetProfileDescription: profileDescription(profile) })));
   read('list_projects','List discovered Freebuff projects.',{},()=>runtime.listProjects());
