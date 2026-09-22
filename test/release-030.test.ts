@@ -186,3 +186,22 @@ test('0.3: custom conversation participant IDs cannot alias another native sessi
     );
   } finally { await cleanup(); }
 });
+
+
+test('0.3: configured remote OpenCode failures never fall back to a local discovered server', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  process.env.OPENCODE_SERVER_PASSWORD = 'audit-placeholder-password';
+  const seen: string[] = [];
+  globalThis.fetch = async (input) => { seen.push(String(input)); throw new Error('remote unavailable'); };
+  try {
+    const adapter = new OpenCodeAdapter('https://example.invalid:4096');
+    const capabilities = await adapter.capabilities();
+    assert.equal(capabilities.discovery.supported, false);
+    assert.ok(seen.length >= 1);
+    assert.equal(seen.every((value) => new URL(value).hostname === 'example.invalid'), true, 'remote configuration must never retarget to a loopback server after failure');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD; else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+  }
+});
