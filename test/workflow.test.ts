@@ -36,14 +36,15 @@ test('handoff token budget: oversized fields become explicit omissions, durable 
   const previous = process.env.INTEROP_HANDOFF_TOKEN_BUDGET;
   try {
     const store = new WorkflowStore();
-    // Controlled input: a fixed workId so the packet's token size is a pure function of
-    // the caller's content — no random store-generated IDs participate in accounting.
-    const workId = 'work_budget_fixture';
+    // Create one durable work/evidence identity and reuse it for every packet measurement.
+    // Random IDs are therefore fixed across the probe calls and do not affect the delta.
+    const work = await store.createWork({ objective: 'migration', acceptanceCriteria: ['done'] });
+    const evidence = await store.addEvidence({ workId: work.id, kind: 'artifact', trust: 'runtime_observed', source: { adapter: 'fixture' }, summary: 'fixture', data: { ok: true } });
     const input = {
-      workId, sourceSession: 'codex:t1', destinationSession: 'claude-code:s1',
+      workId: work.id, sourceSession: 'codex:t1', destinationSession: 'claude-code:s1',
       objective: 'Apply the migration script and report results',
       acceptanceCriteria: ['migration runs cleanly', 'rollback documented'],
-      evidenceIds: ['evidence_1'], changedFiles: ['db/migration.sql', 'db/rollback.sql', 'docs/migration-notes.md'],
+      evidenceIds: [evidence.id], changedFiles: ['db/migration.sql', 'db/rollback.sql', 'docs/migration-notes.md'],
       // Large controlled risk text: its exclusion gap (hundreds of tokens) must dwarf
       // both the omission-note cost (~29 tokens) and random-ID tokenization variance
       // (a 12-token band), so the budget sits in a wide, deterministic safe zone.
@@ -94,8 +95,9 @@ test('handoff IDs are collision-resistant under a frozen clock (same-millisecond
   Date.now = () => fixed;
   try {
     const store = new WorkflowStore();
+    const work = await store.createWork({ objective: 'collision fixture', acceptanceCriteria: ['done'] });
     const base = {
-      workId: 'work_collision_fixture', sourceSession: 'codex:t1', destinationSession: 'claude-code:s1',
+      workId: work.id, sourceSession: 'codex:t1', destinationSession: 'claude-code:s1',
       objective: 'placeholder', acceptanceCriteria: ['done'], evidenceIds: [], changedFiles: [],
       risks: [], unresolvedQuestions: [], authorityBoundaries: ['staging only'],
     };
