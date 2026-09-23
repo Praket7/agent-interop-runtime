@@ -24,6 +24,7 @@ const LOCK_RENEW_INTERVAL_MS = 5_000;
 
 /** Tracks the lock held by the current async execution context (reentrancy support). */
 const heldLock = new AsyncLocalStorage<HeldLock>();
+const processLockTails = new Map<string, Promise<void>>();
 
 interface HeldLock { file: string; token: string }
 
@@ -115,6 +116,21 @@ export async function withStateLock<T>(file: string, owner: string, fn: () => Pr
   const resolved = path.resolve(file);
   const alreadyHeld = heldLock.getStore();
   if (alreadyHeld?.file === resolved) return fn();
+  const previous = processLockTails.get(resolved) ?? Promise.resolve();
+  let releaseProcessLock!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseProcessLock = resolve; });
+  const tail = previous.then(() => gate);
+  processLockTails.set(resolved, tail);
+  await previous;
+  try {
+    return await withFileStateLock(resolved, owner, fn);
+  } finally {
+    releaseProcessLock();
+    if (processLockTails.get(resolved) === tail) processLockTails.delete(resolved);
+  }
+}
+
+async function withFileStateLock<T>(resolved: string, owner: string, fn: () => Promise<T>): Promise<T> {
   await fs.mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
   const lockFile = `${resolved}.lock`;
   const token = randomUUID();
