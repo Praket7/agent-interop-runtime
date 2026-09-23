@@ -29,6 +29,7 @@ interface HeldLock { file: string; token: string }
 
 async function isProcessAlive(pid: number): Promise<boolean> {
   if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
 
