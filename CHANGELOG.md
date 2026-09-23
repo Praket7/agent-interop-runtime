@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Wait for interrupted-send recovery before the MCP server accepts requests, so queued conversation state is reconciled before clients begin using it.
+- Make the native PTY dependency optional for installs that do not use Freebuff CLI mode; add packed-install smoke checks and strengthen cross-platform release validation.
+- Align package and MCP Registry metadata to 0.3.1, with a reusable tag-driven release workflow.
+
 ## 0.3.0
 
 This release turns Agent Interop Runtime into a stronger coordination and reliability layer for heterogeneous native coding-agent sessions.

@@ -53,8 +53,8 @@ agent-interop-runtime doctor
 You can also use the package without a global install.
 
 ```text
-pnpm dlx agent-interop-runtime@0.3.0 doctor
-pnpm dlx agent-interop-runtime@0.3.0 serve
+pnpm dlx agent-interop-runtime@0.3.1 doctor
+pnpm dlx agent-interop-runtime@0.3.1 serve
 ```
 
 The version is pinned in the examples so a host does not silently change behavior during startup. Update the version deliberately after reviewing a release.
@@ -81,8 +81,8 @@ enabled = true
 The installer can add or repair this entry.
 
 ```text
-pnpm dlx agent-interop-runtime@0.3.0 install
-pnpm dlx agent-interop-runtime@0.3.0 install --write
+pnpm dlx agent-interop-runtime@0.3.1 install
+pnpm dlx agent-interop-runtime@0.3.1 install --write
 ```
 
 The write command preserves unrelated Codex configuration, makes one backup, uses an atomic replacement, and refuses malformed existing content. Set `CODEX_HOME` when Codex uses a nonstandard configuration directory.
@@ -134,6 +134,8 @@ FREEBUFF_MCP_CLI_MODE=pty
 FREEBUFF_CLI_PATH=/absolute/path/to/freebuff
 FREEBUFF_PROJECT_ROOT=/absolute/path/to/project
 ```
+
+The CLI mode requires the native `node-pty` dependency. Recent npm versions block dependency install scripts until explicitly allowed; when using npm to install the package, approve this dependency with `npm install --global --allow-scripts=node-pty agent-interop-runtime`.
 
 On Windows the path may point to `freebuff.exe`. On macOS and Linux it must point to an executable file. The runtime also checks the normal user local installation locations for each operating system.
 

@@ -14,9 +14,6 @@ importers:
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
-      node-pty:
-        specifier: 1.2.0-beta.15
-        version: 1.2.0-beta.15
       zod:
         specifier: ^4.1.5
         version: 4.5.4
@@ -30,6 +27,10 @@ importers:
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
+    optionalDependencies:
+      node-pty:
+        specifier: 1.2.0-beta.15
+        version: 1.2.0-beta.15
 
 packages:
 
@@ -978,11 +979,13 @@ snapshots:
     dependencies:
       content-type: 2.1.0
 
-  node-addon-api@7.1.1: {}
+  node-addon-api@7.1.1:
+    optional: true
 
   node-pty@1.2.0-beta.15:
     dependencies:
       node-addon-api: 7.1.1
+    optional: true
 
   object-assign@4.1.1: {}
 

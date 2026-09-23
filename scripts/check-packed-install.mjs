@@ -12,7 +12,7 @@ const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-interop-pack-smoke-'
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 try {
-  const install = spawnSync(npm, ['install', '--global', '--prefix', prefix, '--no-audit', '--no-fund', tarball], {
+  const install = spawnSync(npm, ['install', '--global', '--prefix', prefix, '--allow-scripts=node-pty', '--no-audit', '--no-fund', tarball], {
     stdio: 'inherit',
     env: { ...process.env },
     shell: process.platform === 'win32',

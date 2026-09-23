@@ -1,6 +1,6 @@
 # Security policy
 
-Please report security issues privately to the repository maintainers. Do not include credentials, tokens, cookies, or private source code in an issue.
+Please report security issues through [GitHub private vulnerability reporting](https://github.com/Praket7/agent-interop-runtime/security/advisories/new). Do not include credentials, tokens, cookies, or private source code in a public issue. Maintainers will coordinate disclosure and publish fixes and advisories when appropriate.
 
 ## Security model
 
