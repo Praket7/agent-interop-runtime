@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Praket7/agent-interop-runtime",
   "title": "Agent Interop Runtime",
-  "description": "A local coordination and reliability MCP runtime for Freebuff, Codex, OpenCode, Claude Code, and Cursor sessions.",
+  "description": "Local MCP runtime for coordinating Freebuff, Codex, OpenCode, Claude Code, and Cursor agents.",
   "repository": {
     "url": "https://github.com/Praket7/agent-interop-runtime",
     "source": "github"
   },
-  "version": "0.3.1",
+  "version": "0.3.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agent-interop-runtime",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "transport": {
         "type": "stdio"
       }

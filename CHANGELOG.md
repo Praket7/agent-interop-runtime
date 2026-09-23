@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Shorten MCP Registry description to meet its 100-character limit and publish the corrected registry metadata.
+
 ## 0.3.1
 
 - Wait for interrupted-send recovery before the MCP server accepts requests, so queued conversation state is reconciled before clients begin using it.

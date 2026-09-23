@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "A local coordination and reliability MCP runtime for native coding agent sessions.",
   "keywords": [
