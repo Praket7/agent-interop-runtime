@@ -1,29 +1,39 @@
-# Adapter guide
+# Provider guide
 
-## Freebuff
+Each provider keeps its own login and permissions. The runtime uses the provider interface available on the local computer. Run `agent-interop-runtime doctor` to see what is available on your machine.
 
-Freebuff remains the source adapter. Desktop discovery uses fresh readiness data, platform logs, and listener probing. Desktop writes require a verified launch ID handshake. CLI mode uses a managed PTY and reads persisted visible history.
+## Freebuff Desktop
+
+The runtime connects to the running Desktop app through its local interface. It checks the current launch identifier before adding write tools. If the check fails, the connection stays read only.
+
+## Freebuff CLI
+
+CLI mode starts a managed terminal session. Set `FREEBUFF_MCP_CLI_MODE=pty`, `FREEBUFF_CLI_PATH`, and `FREEBUFF_PROJECT_ROOT` in the MCP server environment. The native `node-pty` package must work with your Node version. Run `pnpm pty:probe` from a source checkout when startup fails.
+
+CLI mode takes priority when selected. It does not use a Desktop session as a substitute.
 
 ## OpenCode
 
-Start the native server with `opencode serve` and set `OPENCODE_SERVER_URL` when needed. Non-loopback OpenCode endpoints require HTTPS plus credentials by default; `OPENCODE_ALLOW_INSECURE_REMOTE=1` is an explicit trusted-network escape hatch. The adapter uses the documented session routes for list, create, prompt, async prompt, abort, permissions, and diff. It listens to the server event stream and filters events by exact session identity.
+OpenCode uses its server API. A local server can be started automatically on loopback. Set `OPENCODE_SERVER_URL` to select another endpoint. Set `OPENCODE_AUTO_START=false` to turn off managed startup.
+
+Remote servers require HTTPS plus `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`. Plain HTTP on a remote address is refused unless `OPENCODE_ALLOW_INSECURE_REMOTE=1` is set on a trusted private network.
+
+The runtime can list sessions, create a session, send a prompt, request cancellation, read events, collect a diff, and answer a permission request. The server must support the requested action. A lost response to a change request is reported as `delivery_unknown`. The runtime does not retry that request.
 
 ## Codex
 
-The adapter starts `codex app-server` when available and initializes through JSON RPC. It uses `thread/list`, `thread/start`, `thread/resume`, `turn/start`, and `turn/interrupt`. Native notifications are returned as provider events. The adapter does not scrape a terminal or expose hidden reasoning.
+The runtime starts `codex app-server` when available. It can list, create, resume, prompt, and interrupt threads through the app server protocol. Native events are available while the process remains connected.
 
 ## Claude Code
 
-The adapter uses a configured ACP command, defaulting to `claude-code-acp`. It initializes ACP with file reading and terminal capabilities, uses `session/new`, `session/list`, `session/load`, `session/prompt`, and `session/cancel`, and applies model and thought level changes through ACP configuration methods when the agent advertises them. ACP history remains provider owned. A session list is available when the configured Claude ACP executable exposes `session/list`.
-
-Run `pnpm pty:probe` when Freebuff CLI startup reports `posix_spawnp failed`. The probe spawns the platform shell equivalent of `/bin/echo` through node pty. The package pins the release containing the macOS spawn helper permission fix. A failure indicates a native runtime or executable permission problem, not a Freebuff login result. Rebuild node pty with `pnpm rebuild node-pty` using the supported Node runtime and retry.
+The runtime uses `claude-code-acp` by default. Set `CLAUDE_ACP_COMMAND` to use another executable. Session listing, loading, cancellation, model selection, and reasoning controls depend on features advertised by that executable.
 
 ## Cursor
 
-Cursor uses the same Agent Client Protocol family through the `agent acp` command. The adapter performs Cursor login when the initialization response advertises `cursor_login`. It preserves Cursor session identifiers, creates and resumes sessions when the provider advertises those methods, sends prompts, cancels work, and maps the requested agent value to Cursor mode. Model and mode controls remain provider negotiated and failures are returned instead of being simulated.
+The runtime uses the Cursor `agent acp` command. It can sign in when Cursor advertises its login method. Session actions and model controls depend on the installed command.
 
-The setup command writes the Cursor MCP configuration without deleting unrelated servers. Use the global path for all projects or the project path for one workspace.
+## Readiness
 
-## Configuration
+Discovery only confirms that a provider answered a discovery request. It does not prove that the account is authenticated, that every operation works, or that a model completed a task.
 
-Useful environment settings include `OPENCODE_SERVER_URL`, `CODEX_APP_SERVER_COMMAND`, `CLAUDE_ACP_COMMAND`, `INTEROP_STATE_FILE`, and the existing Freebuff settings documented in the root README.
+The local automated tests use simulated provider responses. The project has seen a Freebuff GLM 5.3 Flash response. An OpenCode Big Pickle prompt was accepted, but its completion was not observed. These results describe those individual sessions only.

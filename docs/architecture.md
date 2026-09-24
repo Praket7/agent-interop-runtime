@@ -1,52 +1,35 @@
-# Architecture
+# How the pieces fit
 
-Agent Interop Runtime is a local coordination and reliability layer above native coding-agent transports. It preserves provider identity instead of pretending heterogeneous sessions are one generic transcript.
+Agent Interop Runtime is a small local service between an MCP client and coding agents installed on the same computer.
 
-```mermaid
-flowchart LR
-  Client[MCP client] --> Surface[Capability-scoped MCP surface]
-  Surface --> Backend[Shared interop backend]
-  Backend --> Registry[Native provider registry]
-  Registry --> Freebuff[Freebuff bridge]
-  Registry --> OpenCode[OpenCode HTTP]
-  Registry --> Codex[Codex App Server]
-  Registry --> Claude[Claude ACP]
-  Registry --> Cursor[Cursor ACP]
-  Backend --> Workflow[Durable work graph]
-  Workflow --> Claims[Resource claim leases]
-  Workflow --> Handoffs[Bounded structured handoffs]
-  Workflow --> Evidence[Content-addressed evidence]
-  Evidence --> Verify[Workspace-contained verification]
-```
+The MCP client asks the runtime to find a provider session or send it work. The runtime uses that provider's own local interface. The provider still owns its account, conversation, permissions, and project access.
 
-## Provider and session identity
+The runtime stores shared work notes separately. These notes can name an owner, record a handoff, link evidence, or show a check result. They do not become part of a provider's private conversation unless the runtime sends them there.
 
-Every session retains its provider-native identifier. The normalized identifier adds a provider namespace but never substitutes it when calling a provider. Capability probes degrade per provider so one unavailable adapter does not erase healthy sessions.
+## A message has a clear outcome
 
-HTTP MCP protocol sessions share one process-wide backend. Provider processes, event subscriptions, workflow state, and conversation state therefore remain coherent across multiple connected clients.
+The runtime saves a message before sending it. It records whether the provider accepted it. Acceptance does not mean the agent completed the task.
 
-## Durable coordination
+If a connection fails after a request may have reached the provider, the result is marked `delivery_unknown`. The runtime does not send the message again on its own. You can inspect the provider session before deciding what to do.
 
-The workflow store contains work items, dependency edges, evidence, reviews, handoffs, verification results, and resource claims. File-backed mutations use an inter-process lock and atomic replacement. Read paths refresh from disk so long-lived processes see writes made by peers.
+## Sessions keep their provider identity
 
-Resource claims are leases over files, directories, interfaces, or workspaces. The runtime atomically rejects conflicting exclusive claims. They are coordination primitives, not an operating-system filesystem sandbox: a provider that writes outside the Agent Interop protocol can still violate a claim.
+Each session keeps the provider's own identifier. OpenCode sessions remain tied to the server that exposed them. The runtime does not silently move a session to another server after a failed request.
 
-## Handoffs and evidence
+One provider can be unavailable while another still works. The doctor report shows each provider separately.
 
-Handoffs preserve objective, acceptance criteria, and authority boundaries as mandatory fields. Optional continuation state, validation evidence, assumptions, rollback notes, changed files, risks, next action, evidence references, and repository revision are packed under the configured token budget with explicit omission records.
+## Shared notes are cooperative
 
-Evidence is addressable by ID and includes a SHA-256 content hash. Trust levels distinguish caller claims, provider observations, runtime observations, repository verification, and human acceptance. Review requests carry bounded handoff packets plus evidence references instead of embedding unbounded diffs.
+Work records can track dependencies. Resource claims can help agents avoid editing the same file at once. A claim only coordinates tools that use this runtime. Another program can still change the file.
 
-The handoff lifecycle is explicit: `created → accepted → applied → verified → completed`, with `blocked` and `superseded` escape states.
+Handoffs can include a goal, checks, assumptions, rollback notes, and a next step. The receiver should confirm important claims against the current project.
 
-## Delivery and recovery
+## Verification runs trusted commands
 
-Conversation messages are persisted before provider dispatch. Caller idempotency keys are checked inside the same locked transaction that creates a message. A durable dispatch lease is renewed while the provider call is active; another process will not classify a live leased message as interrupted. Unknown delivery outcomes are never blindly resent.
+Verification is off by default. When enabled, each command runs without a shell. The runtime resolves the workspace and requested working folder through the filesystem, then refuses a symlink that escapes the workspace.
 
-Native event streams use a shared per-session pump. A terminated provider iterator closes its buffer so a later read opens a new subscription. `events_page` overlays a registry-owned monotonic cursor and reconnect epoch, avoiding provider sequence resets.
+The working folder check is not a sandbox. A configured program can start other programs or change files. Only run checks from a source you trust.
 
-## Verification and authority
+## Local files
 
-Verification is disabled unless `INTEROP_ALLOW_VERIFICATION=1`. Checks run without a shell, inside an explicit or provider-verified workspace; command-specific working directories cannot escape that root and credential-shaped environment variables are removed.
-
-String `authorityBoundaries` in a handoff remain explicit continuation constraints, not a claim that every provider action is intercepted. Resource claims are the first machine-enforced coordination boundary. Provider-native permissions remain provider/user controlled.
+File reads stay within the selected project folder. Common credential files are blocked. Small text files are checked for common credential patterns. Binary content is refused. Secret detection is based on patterns, so it cannot find every possible secret.

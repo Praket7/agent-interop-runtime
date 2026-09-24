@@ -126,6 +126,40 @@ test('OpenCode accepts a 204 prompt response without parsing JSON', async () => 
   } finally { globalThis.fetch = previousFetch; }
 });
 
+test('OpenCode does not replay a prompt when the provider may have accepted it', async () => {
+  const previousFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (_input, init) => { if (init?.method === 'POST') posts += 1; throw new Error('response lost after acceptance'); };
+  try {
+    await assert.rejects(() => new OpenCodeAdapter().send('session-1', 'one prompt'), /delivery_unknown/);
+    assert.equal(posts, 1);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('OpenCode marks a server error on a mutation as uncertain without replay', async () => {
+  const previousFetch = globalThis.fetch;
+  let posts = 0;
+  globalThis.fetch = async (_input, init) => { if (init?.method === 'POST') posts += 1; return new Response('provider failed after processing', { status: 503 }); };
+  try {
+    await assert.rejects(() => new OpenCodeAdapter().send('session-1', 'one prompt'), /delivery_unknown/);
+    assert.equal(posts, 1);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('OpenCode keeps a discovered session bound to its original server endpoint', async () => {
+  const previousFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = async (input, init) => { urls.push(String(input)); return init?.method === 'GET' ? Response.json({ id: 'session-1' }) : new Response(null, { status: 204 }); };
+  try {
+    const adapter = new OpenCodeAdapter('http://127.0.0.1:4096');
+    await adapter.getSession('session-1');
+    (adapter as unknown as { base: URL }).base = new URL('http://127.0.0.1:49999');
+    await adapter.send('session-1', 'hello');
+    await adapter.getDiff('session-1');
+    assert.deepEqual(urls.map((url) => new URL(url).port), ['4096', '4096', '4096']);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test('OpenCode retries the alternate model identity for older or newer API shapes', async () => {
   const previousFetch = globalThis.fetch;
   const bodies: unknown[] = [];

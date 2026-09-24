@@ -10,6 +10,7 @@ import { OpenCodeAdapter, ClaudeCodeAdapter, isLoopbackHost, opencodeAuthHeaders
 import { redactString, redact } from '../src/security.js';
 import { validateToml } from '../src/toml.js';
 import { withStateLock } from '../src/state.js';
+import { runVerification } from '../src/verification.js';
 
 async function tmp(prefix: string): Promise<{ dir: string; file: string; cleanup: () => Promise<void> }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -219,6 +220,18 @@ test('AI-07: remote endpoints still require credentials and loopback normalizati
 });
 
 // ---------- AI-08: every accepted command runs; excess is rejected up front ----------
+
+test('verification refuses cwd symlinks that resolve outside the workspace', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-cwd-root-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-cwd-outside-'));
+  try {
+    await fs.symlink(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(() => runVerification({ cwd: root, git: false, commands: { test: { executable: 'node', args: ['--version'], cwd: 'escape' } } }), /escapes/);
+    await fs.mkdir(path.join(root, 'inside'));
+    const result = await runVerification({ cwd: root, git: false, commands: { test: { executable: 'node', args: ['--version'], cwd: 'inside' } } });
+    assert.equal(result.commands[0]?.exitCode, 0);
+  } finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); }
+});
 
 test('AI-08: a fifth failing command blocks verification and quoted arguments survive', async () => {
   const { file, cleanup } = await tmp('interop-ai08-');

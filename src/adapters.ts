@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { Json } from './types.js';
 import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, OperationReceipt, ProviderId, AgentSendOptions, ModelSelection } from './interop.js';
 import { VERSION } from './version.js';
-import { safeProjectPath } from './security.js';
+import { readSafeProjectText, safeProjectPath } from './security.js';
 import { promisify } from 'node:util';
 import net from 'node:net';
 
@@ -77,6 +77,7 @@ export function opencodeAuthHeaders(): Record<string, string> {
 export class OpenCodeAdapter implements AgentAdapter {
   readonly id: ProviderId = 'opencode';
   private base: URL;
+  private readonly sessionEndpoints = new Map<string, URL>();
   private available = false;
   private lastError?: string;
   private readonly eventSequences = new Map<string, number>();
@@ -118,28 +119,64 @@ export class OpenCodeAdapter implements AgentAdapter {
     })();
     return this.managedServerStart;
   }
-  private async request<T>(method: string, route: string, body?: unknown): Promise<T> { this.assertEndpointSecurity(); const run = async () => { const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() }; const response = await fetch(new URL(route, this.base), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000), redirect: 'error' }); const raw = await response.text(); if (!response.ok) { let detail = raw; try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {} detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000); throw new OpenCodeHttpError(response.status, detail || response.statusText); } return (raw ? JSON.parse(raw) : undefined) as T; }; try { return await run(); } catch (error) { if (error instanceof OpenCodeHttpError) throw error; if (!isLoopbackHost(this.base.hostname)) throw error; const discovered = await discoverOpenCodeUrl(); if (discovered && discovered.href !== this.base.href) { this.base = discovered; return run(); } const managed = await this.startManagedServer(); if (managed) { this.base = managed; return run(); } throw error; } }
+  private async request<T>(method: string, route: string, body?: unknown, nativeSessionId?: string): Promise<T> {
+    const sessionEndpoint = nativeSessionId ? this.sessionEndpoints.get(nativeSessionId) : undefined;
+    if (nativeSessionId && !sessionEndpoint) this.sessionEndpoints.set(nativeSessionId, this.base);
+    const endpoint = sessionEndpoint ?? this.base;
+    this.assertEndpointSecurity();
+    const run = async (url: URL) => {
+      const headers: Record<string, string> = { accept: 'application/json', 'content-type': 'application/json', ...opencodeAuthHeaders() };
+      const response = await fetch(new URL(route, url), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000), redirect: 'error' });
+      const raw = await response.text();
+      if (!response.ok) {
+        let detail = raw;
+        try { const parsed = record(JSON.parse(raw)); detail = text(parsed.message) ?? text(parsed.error) ?? raw; } catch {}
+        detail = detail.replace(/(authorization|token|password|secret)\s*[=:]\s*[^\s,}]+/gi, '$1=[REDACTED]').slice(0, 1000);
+        throw new OpenCodeHttpError(response.status, detail || response.statusText);
+      }
+      return (raw ? JSON.parse(raw) : undefined) as T;
+    };
+    try { return await run(endpoint); }
+    catch (error) {
+      if (error instanceof OpenCodeHttpError) {
+        if (method.toUpperCase() !== 'GET' && error.status >= 500) throw new Error(`OpenCode delivery_unknown for ${method} ${route}; the provider returned HTTP ${error.status}`, { cause: error });
+        throw error;
+      }
+      if (method.toUpperCase() !== 'GET') throw new Error(`OpenCode delivery_unknown for ${method} ${route}; the provider may have accepted the request`, { cause: error });
+      if (sessionEndpoint || !isLoopbackHost(endpoint.hostname)) throw error;
+      const discovered = await discoverOpenCodeUrl();
+      if (discovered && discovered.href !== endpoint.href) {
+        this.base = discovered;
+        return run(discovered);
+      }
+      const managed = await this.startManagedServer();
+      if (managed) { this.base = managed; return run(managed); }
+      throw error;
+    }
+  }
   private modelBody(selection: NonNullable<AgentSendOptions['model']>, field: 'modelID' | 'id') { return { providerID: selection.providerID, [field]: selection.modelID }; }
-  private async requestWithModelFallback<T>(method: string, route: string, selection: NonNullable<AgentSendOptions['model']>, body: (model: Record<string, unknown>) => unknown): Promise<T> { try { return await this.request<T>(method, route, body(this.modelBody(selection, 'modelID'))); } catch (error) { if (!(error instanceof OpenCodeHttpError) || error.status !== 400 || !/(modelID|model id|unknown field|invalid model|expected id)/i.test(error.providerDetail)) throw error; return this.request<T>(method, route, body(this.modelBody(selection, 'id'))); } }
+  private async requestWithModelFallback<T>(method: string, route: string, selection: NonNullable<AgentSendOptions['model']>, body: (model: Record<string, unknown>) => unknown, nativeSessionId: string): Promise<T> { try { return await this.request<T>(method, route, body(this.modelBody(selection, 'modelID')), nativeSessionId); } catch (error) { if (!(error instanceof OpenCodeHttpError) || error.status !== 400 || !/(modelID|model id|unknown field|invalid model|expected id)/i.test(error.providerDetail)) throw error; return this.request<T>(method, route, body(this.modelBody(selection, 'id')), nativeSessionId); } }
   async capabilities(): Promise<AgentCapabilities> { this.lastError = undefined; try { await this.request('GET', '/global/health'); this.available = true; } catch (first) { try { const sessions = await this.request<unknown>('GET', '/session'); if (!Array.isArray(sessions)) throw new Error('OpenCode /session returned malformed response'); this.available = true; } catch (error) { this.available = false; this.lastError = error instanceof Error ? error.message : String(error); } } const reason = this.available ? undefined : this.lastError ?? 'Start opencode serve --hostname 127.0.0.1 --port 4096 or set OPENCODE_SERVER_URL'; return { provider: this.id, adapterVersion: VERSION, authorization: this.available ? 'authorized' : 'unknown', discovery: cap(this.available, 'http', 'OpenCode server API', reason), sessions: cap(this.available, 'http', 'OpenCode session API', reason), sendMessage: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), steer: cap(this.available, 'http', 'POST /session/:id/prompt_async; transport acceptance only', reason), cancel: cap(this.available, 'http', 'POST /session/:id/abort', reason), events: cap(this.available, 'http', 'GET /event with reconnect', reason), diff: cap(this.available, 'http', 'GET /session/:id/diff', reason), permissions: cap(this.available, 'http', 'POST /session/:id/permissions/:permissionID', reason), model: cap(false, 'OpenCode prompt request', 'OpenCode server API', this.available ? 'Native session model mutation is not exposed by the validated API. Pass model on agent_send.' : reason), reasoning: cap(this.available, 'OpenCode prompt request', 'OpenCode model variant', this.available ? 'Mapped to the selected OpenCode model variant on the next prompt.' : reason), limitations: ['Existing session attachment requires a reachable OpenCode server', 'Accepted means the OpenCode HTTP endpoint accepted the prompt; it does not mean the agent completed it', 'Model selection is an explicit next prompt override, not persistent session mutation'] }; }
-  async listSessions(): Promise<AgentSession[]> { const values = await this.request<unknown>('GET', '/session'); if (!Array.isArray(values)) throw new Error('OpenCode /session returned malformed response'); return values.map((v) => { const s = record(v); const id = text(s.id) ?? ''; const model = record(s.model); return { id: `opencode:${id}`, nativeId: id, provider: this.id, projectId: text(s.projectID), title: text(s.title), state: text(s.status), model: text(model.providerID) && text(model.modelID) ? `${text(model.providerID)}/${text(model.modelID)}` : text(model.id), cwd: text(s.directory) ?? text(record(s.location).directory), transport: 'http', provenance: { discoveredAt: now(), source: 'OpenCode /session', native: true as const } }; }).filter((s) => s.nativeId); }
-  async getSession(nativeId: string): Promise<AgentSession | null> { try { const s = record(await this.request('GET', `/session/${encodeURIComponent(nativeId)}`)); const model = record(s.model); return { id: `opencode:${nativeId}`, nativeId, provider: this.id, projectId: text(s.projectID), title: text(s.title), state: text(s.status), model: text(model.providerID) && text(model.modelID) ? `${text(model.providerID)}/${text(model.modelID)}` : text(model.id), cwd: text(s.directory) ?? text(record(s.location).directory), transport: 'http', provenance: { discoveredAt: now(), source: 'OpenCode /session/:id', native: true as const } }; } catch (error) { if (error instanceof Error && /HTTP 404/.test(error.message)) return null; throw error; } }
+  async listSessions(): Promise<AgentSession[]> { const values = await this.request<unknown>('GET', '/session'); if (!Array.isArray(values)) throw new Error('OpenCode /session returned malformed response'); return values.map((v) => { const s = record(v); const id = text(s.id) ?? ''; if (id) this.sessionEndpoints.set(id, this.base); const model = record(s.model); return { id: `opencode:${id}`, nativeId: id, provider: this.id, projectId: text(s.projectID), title: text(s.title), state: text(s.status), model: text(model.providerID) && text(model.modelID) ? `${text(model.providerID)}/${text(model.modelID)}` : text(model.id), cwd: text(s.directory) ?? text(record(s.location).directory), transport: 'http', provenance: { discoveredAt: now(), source: 'OpenCode /session', native: true as const } }; }).filter((s) => s.nativeId); }
+  async getSession(nativeId: string): Promise<AgentSession | null> { try { const s = record(await this.request('GET', `/session/${encodeURIComponent(nativeId)}`, undefined, nativeId)); this.sessionEndpoints.set(nativeId, this.sessionEndpoints.get(nativeId) ?? this.base); const model = record(s.model); return { id: `opencode:${nativeId}`, nativeId, provider: this.id, projectId: text(s.projectID), title: text(s.title), state: text(s.status), model: text(model.providerID) && text(model.modelID) ? `${text(model.providerID)}/${text(model.modelID)}` : text(model.id), cwd: text(s.directory) ?? text(record(s.location).directory), transport: 'http', provenance: { discoveredAt: now(), source: 'OpenCode /session/:id', native: true as const } }; } catch (error) { if (error instanceof Error && /HTTP 404/.test(error.message)) return null; throw error; } }
   async createSession(options: { cwd?: string; title?: string }): Promise<AgentSession> { const query = options.cwd ? `?directory=${encodeURIComponent(options.cwd)}` : ''; const s = record(await this.request('POST', `/session${query}`, { title: options.title })); return (await this.getSession(text(s.id) ?? ''))!; }
   async resumeSession(nativeId: string): Promise<AgentSession> { const session = await this.getSession(nativeId); if (!session) throw new Error(`OpenCode session ${nativeId} was not found`); return session; }
-  async send(nativeId: string, value: string, options?: AgentSendOptions): Promise<OperationReceipt> { const route = `/session/${encodeURIComponent(nativeId)}/prompt_async`; let selection = options?.model; if (options?.reasoning && !selection) { const session = await this.getSession(nativeId); const current = session?.model; if (!current) throw new Error('OpenCode reasoning requires an active model or an explicit model selection'); const slash = current.indexOf('/'); selection = slash > 0 ? { providerID: current.slice(0, slash), modelID: current.slice(slash + 1), variant: options.reasoning } : { providerID: 'opencode', modelID: current, variant: options.reasoning }; } else if (selection && options?.reasoning) selection = { ...selection, variant: options.reasoning }; if (selection) await this.requestWithModelFallback('POST', route, selection, (model) => ({ model, ...(selection?.variant ? { variant: selection.variant } : {}), ...(options?.agent ? { agent: options.agent } : {}), parts: [{ type: 'text', text: value }] })); else await this.request('POST', route, { ...(options?.agent ? { agent: options.agent } : {}), parts: [{ type: 'text', text: value }] }); return { provider: this.id, nativeId, operation: 'send', accepted: true, status: 'queued', providerState: 'transport_accepted', detail: json({ delivery: 'transport_accepted', completion: 'not_observed' }) }; }
+  async send(nativeId: string, value: string, options?: AgentSendOptions): Promise<OperationReceipt> { const route = `/session/${encodeURIComponent(nativeId)}/prompt_async`; let selection = options?.model; if (options?.reasoning && !selection) { const session = await this.getSession(nativeId); const current = session?.model; if (!current) throw new Error('OpenCode reasoning requires an active model or an explicit model selection'); const slash = current.indexOf('/'); selection = slash > 0 ? { providerID: current.slice(0, slash), modelID: current.slice(slash + 1), variant: options.reasoning } : { providerID: 'opencode', modelID: current, variant: options.reasoning }; } else if (selection && options?.reasoning) selection = { ...selection, variant: options.reasoning }; if (selection) await this.requestWithModelFallback('POST', route, selection, (model) => ({ model, ...(selection?.variant ? { variant: selection.variant } : {}), ...(options?.agent ? { agent: options.agent } : {}), parts: [{ type: 'text', text: value }] }), nativeId); else await this.request('POST', route, { ...(options?.agent ? { agent: options.agent } : {}), parts: [{ type: 'text', text: value }] }, nativeId); return { provider: this.id, nativeId, operation: 'send', accepted: true, status: 'queued', providerState: 'transport_accepted', detail: json({ delivery: 'transport_accepted', completion: 'not_observed' }) }; }
   async steer(nativeId: string, value: string, options?: AgentSendOptions): Promise<OperationReceipt> { return this.send(nativeId, value, options); }
-  async cancel(nativeId: string): Promise<OperationReceipt> { const result = await this.request('POST', `/session/${encodeURIComponent(nativeId)}/abort`); return { provider: this.id, nativeId, operation: 'cancel', accepted: Boolean(result), detail: json(result) }; }
-  async getDiff(nativeId: string): Promise<Json | null> { return json(await this.request('GET', `/session/${encodeURIComponent(nativeId)}/diff`)); }
-  async respondPermission(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const result = await this.request('POST', `/session/${encodeURIComponent(nativeId)}/permissions/${encodeURIComponent(requestId)}`, { response: decision }); return { provider: this.id, nativeId, operation: 'permission', accepted: true, detail: json(result) }; }
+  async cancel(nativeId: string): Promise<OperationReceipt> { const result = await this.request('POST', `/session/${encodeURIComponent(nativeId)}/abort`, undefined, nativeId); return { provider: this.id, nativeId, operation: 'cancel', accepted: Boolean(result), detail: json(result) }; }
+  async getDiff(nativeId: string): Promise<Json | null> { return json(await this.request('GET', `/session/${encodeURIComponent(nativeId)}/diff`, undefined, nativeId)); }
+  async respondPermission(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { const result = await this.request('POST', `/session/${encodeURIComponent(nativeId)}/permissions/${encodeURIComponent(requestId)}`, { response: decision }, nativeId); return { provider: this.id, nativeId, operation: 'permission', accepted: true, detail: json(result) }; }
   async setModel(_nativeId: string, _selection: ModelSelection): Promise<OperationReceipt> { throw new Error('OpenCode does not expose a validated native session model mutation; provide model in the next agent_send request'); }
   async *events(nativeId: string): AsyncIterable<AgentEvent> {
     let failures = 0;
+    const endpoint = this.sessionEndpoints.get(nativeId) ?? this.base;
+    if (!this.sessionEndpoints.has(nativeId)) this.sessionEndpoints.set(nativeId, endpoint);
     while (true) {
       try {
         this.assertEndpointSecurity();
         // AI-07: same auth policy as normal requests, including the password-only default user.
         const headers: Record<string, string> = { accept: 'text/event-stream', ...opencodeAuthHeaders() };
-        const response = await fetch(new URL('/event', this.base), { headers, signal: AbortSignal.timeout(30_000), redirect: 'error' });
+        const response = await fetch(new URL('/event', endpoint), { headers, signal: AbortSignal.timeout(30_000), redirect: 'error' });
         if (!response.ok || !response.body) throw new Error(`OpenCode event stream HTTP ${response.status}`);
         failures = 0;
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
@@ -277,9 +314,7 @@ abstract class NativeProtocolAdapter implements AgentAdapter {
     const root = this.sessions.get(sessionId)?.cwd ?? this.options.cwd;
     if (!root) throw new Error(`No verified workspace is recorded for session ${sessionId}; refusing to guess a cwd for file access`);
     const file = await safeProjectPath(root, requested);
-    const stat = await fs.stat(file);
-    if (stat.size > 1_000_000) throw new Error('ACP file read exceeds the 1 MB safety limit');
-    const content = await fs.readFile(file, 'utf8');
+    const content = await readSafeProjectText(file);
     const line = typeof params.line === 'number' ? Math.max(1, Math.floor(params.line)) : 1;
     const limit = typeof params.limit === 'number' ? Math.min(10_000, Math.max(1, Math.floor(params.limit))) : undefined;
     const lines = content.split(/\r?\n/);

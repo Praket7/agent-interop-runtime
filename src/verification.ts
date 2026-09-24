@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
+import fs from 'node:fs/promises';
 
 export type VerificationCommandName = 'test' | 'lint' | 'typecheck' | 'build' | `check${number}`;
 
@@ -134,13 +135,14 @@ function displayCommand(command: VerificationCommand): string {
   return [command.executable, ...(command.args ?? [])].join(' ');
 }
 
-function containedCwd(root: string, requested?: string): string {
-  const base = resolve(root);
-  const cwd = resolve(base, requested ?? '.');
+async function containedCwd(root: string, requested?: string): Promise<string> {
+  const base = await fs.realpath(root);
+  const cwd = await fs.realpath(resolve(base, requested ?? '.'));
   const rel = relative(base, cwd);
   if (rel === '..' || rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(rel)) {
     throw new Error(`Verification cwd escapes the declared workspace: ${requested ?? cwd}`);
   }
+  if (!(await fs.stat(cwd)).isDirectory()) throw new Error('Verification cwd must be a directory');
   return cwd;
 }
 
@@ -156,7 +158,7 @@ function verificationEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 async function runCommand(name: VerificationCommandName, command: VerificationCommand, options: Required<Pick<VerificationOptions, 'cwd' | 'maxOutputBytes' | 'timeoutMs'>> & Pick<VerificationOptions, 'env'>): Promise<CommandEvidence> {
-  const cwd = containedCwd(options.cwd, command.cwd);
+  const cwd = await containedCwd(options.cwd, command.cwd);
   const started = Date.now();
   const startedAt = new Date(started).toISOString();
   const result = await runProcess(command.executable, command.args ?? [], { cwd, env: options.env, timeoutMs: command.timeoutMs ?? options.timeoutMs, maxOutputBytes: options.maxOutputBytes });

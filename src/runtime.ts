@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json, ThreadProgressSnapshot } from './types.js';
-import { assertSafeId, blocked, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
+import { assertSafeId, blocked, readSafeProjectText, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
 import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, probePty } from './pty.js';
 import { DesktopEventClient, ProgressStore } from './events.js';
 
@@ -335,7 +335,7 @@ export class DesktopOrchestratorRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); const snapshot=this.progress.read(safe, 0, 1); return {...snapshot, events:[]};}
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{await this.capabilities(); return this.progress.active().map(id => this.progress.read(id, 0, 1));}
   async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);const stat=await fs.stat(file);if(stat.size>1_000_000)throw new Error('Project file exceeds the 1 MB safety limit');return {path:relative,content:await fs.readFile(file,'utf8')};}
+  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:await readSafeProjectText(file)};}
   private async assertWritable(): Promise<void> { const writable = await this.refreshDesktopConnection(); const caps = await this.capabilities(); if (!writable || !this.launchId || caps.readOnly) throw new Error('Freebuff Desktop writes are unavailable: no verified launch authorization contract'); }
   async sendMessage(id:string,text:string){await this.assertWritable();if(!text||text.length>100000)throw new Error('Message must be 1 to 100000 characters');return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/message`,{text})) as Json;}
   async stop(id:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/stop`,{})) as Json;}
@@ -375,7 +375,7 @@ export class CliPtyRuntime implements Runtime {
   async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{ const progress = await this.getThreadProgress(id); return {...progress, events:[]}; }
   async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{ return []; }
   async listFiles(_projectId:string, relative='.') { const root=await fs.realpath(this.root); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); const stat=await fs.stat(file); if(stat.size>1_000_000)throw new Error('Project file exceeds the 1 MB safety limit'); return {path:relative,content:await fs.readFile(file,'utf8')}; }
+  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:await readSafeProjectText(file)}; }
   async sendMessage(id:string,text:string): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,text,this.root,id)) as Json; }
   async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
   async resume(id:string): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,'/resume',this.root,id)) as Json; }

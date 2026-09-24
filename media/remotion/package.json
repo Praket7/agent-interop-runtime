@@ -1,0 +1,26 @@
+{
+  "name": "agent-interop-runtime-media",
+  "version": "1.0.0",
+  "description": "Reproducible project explainer visuals",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.527",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.527"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "dev": "remotion studio src/index.ts",
+    "render:tour": "remotion render src/index.ts AgentInteropExplainer ../../docs/media/agent-interop.mp4",
+    "render:stats": "remotion still src/index.ts CheckedProjectFacts ../../docs/media/agent-interop-stats.png",
+    "render:poster": "remotion still src/index.ts AgentInteropExplainer ../../docs/media/agent-interop.png --frame=105",
+    "typecheck": "tsc --noEmit"
+  },
+  "sideEffects": false
+}

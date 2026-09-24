@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-export const blocked = /^(\.env($|\.)|id_(rsa|ed25519|ecdsa|dsa)$|credentials\.json$|.*\.(pem|key|p12|pfx)$)/i;
+export const blocked = /^(\.env($|\.)|\.npmrc$|\.pypirc$|\.netrc$|\.git-credentials$|\.gitconfig$|\.dockerconfigjson$|credentials?(\.json)?$|secrets?(\.json)?$|id_(rsa|ed25519|ecdsa|dsa)$|.*\.(pem|key|p12|pfx)$|\.(aws|azure|docker|gnupg|kube|npm|ssh)$)/i;
 
 /** Keys whose string values must never survive sanitization. */
 const SENSITIVE_KEYS = /token|secret|password|cookie|fingerprinthash|authorization|api[-_]?key|private[-_]?key|credential/i;
@@ -21,7 +21,7 @@ export function redact(value: unknown): unknown {
 }
 
 const AUTH_HEADER = /((?:authorization|proxy-authorization)\s*[:=]\s*)(bearer|basic|token|digest)?\s*([^\s,;}"'`]+(?:\s+[^\s,;}"'`]+)*)/gi;
-const KEY_VALUE = /((?:authToken|access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|secret|password|session[_-]?token|id[_-]?token|bearer)\s*["']?\s*[:=]\s*["']?)[^\s,"'`}\\]+/gi;
+const KEY_VALUE = /((?:_auth|authToken|access[_-]?token|refresh[_-]?token|token|api[_-]?key|apikey|secret|password|session[_-]?token|id[_-]?token|bearer)\s*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,"'`}\\]+)/gi;
 const OPENSSH_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
 
 export function redactString(value: string): string {
@@ -62,4 +62,14 @@ export async function safeProjectPath(root: string, requested: string): Promise<
   const stat = await fs.stat(candidate);
   if (!stat.isFile()) throw new Error('Only regular files may be read');
   return candidate;
+}
+
+/** Read bounded text while denying common credential files and redacting credential-shaped values. */
+export async function readSafeProjectText(file: string, maxBytes = 1_000_000): Promise<string> {
+  const data = await fs.readFile(file);
+  if (data.byteLength > maxBytes) throw new Error('Project file exceeds the 1 MB safety limit');
+  if (data.includes(0)) throw new Error('Binary project files cannot be read as text');
+  const content = new TextDecoder('utf-8', { fatal: true }).decode(data);
+  if (/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(content)) throw new Error('Binary project files cannot be read as text');
+  return redactString(content);
 }

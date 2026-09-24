@@ -4,10 +4,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const packDir = path.resolve(process.argv[2] ?? 'work');
-const tarballs = fs.readdirSync(packDir).filter((name) => name.endsWith('.tgz'));
-if (tarballs.length !== 1) throw new Error(`Expected exactly one npm tarball in ${packDir}, found ${tarballs.length}`);
-
-const tarball = path.join(packDir, tarballs[0]);
+const manifest = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8'));
+const tarball = path.join(packDir, `${manifest.name}-${manifest.version}.tgz`);
+if (!fs.existsSync(tarball)) throw new Error(`Packed npm tarball is missing: ${tarball}`);
 const prefix = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-interop-pack-smoke-'));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
