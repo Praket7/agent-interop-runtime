@@ -6,7 +6,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CliPtyRuntime } from '../src/runtime.js';
-import { createServer } from '../src/mcp.js';
+import { createBackend, createServer } from '../src/mcp.js';
 
 test('MCP file reads redact credential text and refuse credential files', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-mcp-secret-'));
@@ -17,7 +17,9 @@ test('MCP file reads redact credential text and refuse credential files', async 
   await fs.writeFile(path.join(root, 'notes.txt'), 'release token=synthetic-mcp-secret');
   await fs.writeFile(path.join(root, '.npmrc'), '//registry.npmjs.org/:_authToken=fake-npm-token');
   const runtime = new CliPtyRuntime();
-  const server = createServer(runtime, false, 'full');
+  const backend = createBackend(runtime);
+  await backend.ready;
+  const server = createServer(runtime, false, 'full', backend);
   const client = new Client({ name: 'security-test', version: '1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {
@@ -32,8 +34,9 @@ test('MCP file reads redact credential text and refuse credential files', async 
   } finally {
     await client.close();
     await server.close();
+    backend.dispose();
     runtime.dispose();
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 });
