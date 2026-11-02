@@ -126,4 +126,27 @@ jobs:
         run: ./mcp-publisher login github-oidc
 
       - name: Publish MCP Registry metadata
-        run: ./mcp-publisher publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_attempts=20
+          attempt=1
+          while true; do
+            if output="$(./mcp-publisher publish 2>&1)"; then
+              printf '%s\n' "$output"
+              break
+            else
+              publish_status=$?
+            fi
+            printf '%s\n' "$output" >&2
+            if ! grep -Fq "version '$VERSION' was not found" <<< "$output"; then
+              exit "$publish_status"
+            fi
+            if (( attempt >= max_attempts )); then
+              echo "npm version $VERSION is still not visible to the MCP Registry after $max_attempts attempts" >&2
+              exit "$publish_status"
+            fi
+            echo "npm version $VERSION is not visible to the MCP Registry yet; retry $((attempt + 1))/$max_attempts in 15 seconds"
+            sleep 15
+            attempt=$((attempt + 1))
+          done
