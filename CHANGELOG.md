@@ -6,6 +6,7 @@
 - Standardize modern tool names, combine thread progress waiting and all-thread summaries, and use cursor-aware provider events as the single modern event API.
 - Clarify client connection choices and warn that remote hosts need their own provider installations and accounts.
 - Mark configured verification commands as potentially destructive.
+- Update the MCP runtime and explainer dependencies to patched releases, and check both dependency trees before CI and publication.
 
 ## 0.3.2
 

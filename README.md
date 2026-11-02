@@ -165,6 +165,8 @@ pnpm lint
 pnpm mcp:validate
 pnpm schema:check
 pnpm bench:check
+pnpm audit --prod --audit-level=high
+npm audit --prefix media/remotion --audit-level=high
 pnpm pack:check
 ```
 

@@ -33,6 +33,8 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: pnpm audit --prod --audit-level=high
+      - run: npm audit --prefix media/remotion --audit-level=high
       - run: pnpm test
       - run: pnpm build
       - run: pnpm mcp:validate
