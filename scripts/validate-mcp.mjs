@@ -11,6 +11,7 @@ if (packageJson.version !== serverJson.packages?.[0]?.version) failures.push('se
 if (packageJson.version !== sourceVersion) failures.push('package.json version must match src/version.ts');
 if (packageJson.name !== serverJson.packages?.[0]?.identifier) failures.push('server package identifier must match package.json name');
 if (serverJson.packages?.[0]?.transport?.type !== 'stdio') failures.push('the published transport must be stdio');
+if (typeof serverJson.description !== 'string' || !serverJson.description.trim() || serverJson.description.length > 100) failures.push('server.json description must be a non-empty string of at most 100 characters');
 if (failures.length) {
   console.error(failures.join('\n'));
   process.exitCode = 1;

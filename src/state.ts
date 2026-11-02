@@ -8,6 +8,7 @@ export interface LockInfo { pid: number; host: string; acquiredAt: string; owner
 
 const LOCK_RETRY_MS = 10;
 const LOCK_MAX_WAIT_MS = 10_000;
+const WINDOWS_RENAME_RETRIES = 6;
 /**
  * Stabilization window after a lock's recorded acquisition time before a DEAD-owner lock
  * is recovered. This is NOT a staleness lease: a LIVE owner is never stolen from no matter
@@ -218,11 +219,35 @@ export async function readJsonFile<T>(file: string): Promise<T | undefined> {
   }
 }
 
+/**
+ * Windows can temporarily deny replacing a file while Defender or another scanner opens it.
+ * Keep the atomic rename contract and retry only those transient sharing/access errors; never
+ * unlink the destination as a fallback because a crash could then leave no state file at all.
+ */
+async function renameWithRetry(temp: string, file: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(temp, file);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryable = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '');
+      if (!retryable || attempt >= WINDOWS_RENAME_RETRIES) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (2 ** attempt)));
+    }
+  }
+}
+
 export async function atomicWriteJson(file: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temp = `${file}.${randomUUID()}.tmp`;
   await fs.writeFile(temp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
-  await fs.rename(temp, file);
+  try {
+    await renameWithRetry(temp, file);
+  } catch (error) {
+    await fs.unlink(temp).catch(() => undefined);
+    throw error;
+  }
   if (process.platform !== 'win32') await fs.chmod(file, 0o600);
 }
 

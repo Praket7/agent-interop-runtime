@@ -1,6 +1,12 @@
 # Changelog
 
-# 1.0.0
+## 1.0.1
+
+- Fix the published MCP Registry description and reject descriptions over its 100-character limit before release.
+- Retry short Windows file-replacement sharing errors without deleting existing state.
+- Store dependency overrides where pnpm 11 reads them and keep the released dependency tree clear of known advisories.
+
+## 1.0.0
 
 - Use a focused nine-tool catalog by default and retain the 0.3.x catalog through the `legacy` profile.
 - Standardize modern tool names, combine thread progress waiting and all-thread summaries, and use cursor-aware provider events as the single modern event API.

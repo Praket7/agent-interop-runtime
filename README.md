@@ -75,11 +75,11 @@ The modern profiles use predictable verb first names, and related progress opera
 Choose a profile on the server command, or set `INTEROP_TOOLS_PROFILE` when your client configuration cannot pass an argument.
 
 ```sh
-npx -y agent-interop-runtime@1.0.0 serve --profile minimal
-npx -y agent-interop-runtime@1.0.0 serve --profile core
-npx -y agent-interop-runtime@1.0.0 serve --profile freebuff
-npx -y agent-interop-runtime@1.0.0 serve --profile full
-npx -y agent-interop-runtime@1.0.0 serve --profile legacy
+npx -y agent-interop-runtime@1.0.1 serve --profile minimal
+npx -y agent-interop-runtime@1.0.1 serve --profile core
+npx -y agent-interop-runtime@1.0.1 serve --profile freebuff
+npx -y agent-interop-runtime@1.0.1 serve --profile full
+npx -y agent-interop-runtime@1.0.1 serve --profile legacy
 ```
 
 Read only mode removes tools that change provider or coordination state, and it can be enabled by setting `INTEROP_READ_ONLY=1` in the server environment.
@@ -112,7 +112,7 @@ The runtime talks to provider apps and tools installed on the same computer, so 
 The installer adds or repairs the local Codex entry, backs up the existing configuration before changing it, and preserves unrelated settings.
 
 ```sh
-npx -y agent-interop-runtime@1.0.0 install --write
+npx -y agent-interop-runtime@1.0.1 install --write
 ```
 
 ### Cursor
@@ -120,7 +120,7 @@ npx -y agent-interop-runtime@1.0.0 install --write
 The Cursor installer writes a project independent entry in your user configuration, and `--project` can be added when you want the connection only in the current project.
 
 ```sh
-npx -y agent-interop-runtime@1.0.0 cursor-setup --write
+npx -y agent-interop-runtime@1.0.1 cursor-setup --write
 ```
 
 ### Claude Code

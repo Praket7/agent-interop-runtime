@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { ConversationStore } from '../src/conversations.js';
-import { withStateLock } from '../src/state.js';
+import { atomicWriteJson, withStateLock } from '../src/state.js';
 
 /** Isolated state file per test; cleaned up even on failure. */
 async function tempStore(): Promise<{ file: string; cleanup: () => Promise<void> }> {
@@ -138,6 +138,35 @@ test('AIR-03: two real child processes serialize through the lock and both write
     assert.ok(a, 'process A conversation must survive process B writes');
     assert.ok(b, 'process B conversation must survive process A writes');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('atomic state replacement retries transient Windows rename denial', async () => {
+  const { file, cleanup } = await tempStore();
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const originalRename = fs.rename;
+  let renameCalls = 0;
+  let alwaysFail = false;
+  try {
+    await fs.writeFile(file, JSON.stringify({ value: 'old' }), 'utf8');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    (fs as unknown as { rename: typeof fs.rename }).rename = async (source, destination) => {
+      renameCalls++;
+      if (alwaysFail || renameCalls <= 2) throw Object.assign(new Error('temporary sharing violation'), { code: 'EPERM' });
+      return originalRename(source, destination);
+    };
+    await atomicWriteJson(file, { value: 'new' });
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { value: 'new' });
+    assert.equal(renameCalls, 3, 'the write should retry twice, then atomically replace the file');
+    alwaysFail = true;
+    await assert.rejects(() => atomicWriteJson(file, { value: 'never-written' }), { code: 'EPERM' });
+    assert.equal(renameCalls, 10, 'a permanent sharing violation should stop after six retries');
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { value: 'new' }, 'the previous state must survive exhausted retries');
+    assert.deepEqual(await fs.readdir(path.dirname(file)), [path.basename(file)], 'failed temporary files must be removed');
+  } finally {
+    (fs as unknown as { rename: typeof fs.rename }).rename = originalRename;
+    Object.defineProperty(process, 'platform', originalPlatform);
+    await cleanup();
+  }
 });
 
 test('AIR-04: a long-lived reader observes another process committed writes', async () => {

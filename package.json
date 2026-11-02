@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "Coordinate coding agents through a local MCP runtime while keeping provider accounts and workspaces separate.",
   "keywords": [
@@ -71,11 +71,5 @@
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.2"
-  },
-  "pnpm": {
-    "overrides": {
-      "@hono/node-server": "2.1.5",
-      "express-rate-limit": "8.7.2"
-    }
   }
 }

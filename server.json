@@ -2,17 +2,17 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Praket7/agent-interop-runtime",
   "title": "Agent Interop Runtime",
-  "description": "Local-first stdio MCP server for coordinating coding agents while keeping provider accounts and workspaces separate.",
+  "description": "Coordinate coding agents through a local MCP server while keeping accounts and workspaces separate.",
   "repository": {
     "url": "https://github.com/Praket7/agent-interop-runtime",
     "source": "github"
   },
-  "version": "1.0.0",
+  "version": "1.0.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agent-interop-runtime",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "transport": {
         "type": "stdio"
       }
