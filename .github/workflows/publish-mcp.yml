@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing release tag to publish
         required: true
-        default: v0.3.1
+        default: v1.0.0
         type: string
 
 permissions:

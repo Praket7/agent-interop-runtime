@@ -372,8 +372,8 @@ test('mcp: conversation_reconcile tool is registered and drives recovery through
   const { createServer } = await import('../src/mcp.js');
   const runtime = { capabilities: async () => ({ providers: {} }), listProjects: async () => [], listThreads: async () => [], getThread: async () => null, getMessages: async () => [], activeWork: async () => null, getThreadProgress: async () => ({ events: [], nextSequence: 0 }), watchThread: async () => ({ events: [], nextSequence: 0 }), getThreadProgressSummary: async () => ({}), watchActiveThreads: async () => ({}), listFiles: async () => [], readFile: async () => '', listModels: async () => [], sendMessage: async () => ({}), stop: async () => ({}), resume: async () => ({}), setModel: async () => ({}), setReasoning: async () => ({}), dispose: () => undefined } as never;
   const server = createServer(runtime, true, 'full') as unknown as { _registeredTools: Record<string, { handler?: (args: Record<string, never>) => Promise<{ content: Array<{ text: string }> }> }> };
-  const tool = server._registeredTools['conversation_reconcile'];
-  assert.ok(tool?.handler, 'conversation_reconcile must be registered as a write tool');
+  const tool = server._registeredTools['reconcile_conversation_sends'];
+  assert.ok(tool?.handler, 'reconcile_conversation_sends must be registered as a write tool');
   // Drive it with a seeded delivery_unknown record; a verified receipt closes it.
   const { file, cleanup } = await tempStore();
   try {
@@ -384,7 +384,7 @@ test('mcp: conversation_reconcile tool is registered and drives recovery through
     await store.join(conversation.id, { provider: 'opencode', nativeId: 'a' });
     await store.join(conversation.id, { provider: 'opencode', nativeId: 'b' });
     await seedMessage(store, file, conversation.id, { idempotencyKey: 'key-mcp', delivery: 'delivery_unknown', deliveryUnknownAt: new Date().toISOString() });
-    const result = await fresh._registeredTools['conversation_reconcile']!.handler!({ conversationId: conversation.id, observedReceipts: [{ idempotencyKey: 'key-mcp', receipt: { provider: 'opencode', nativeId: 'b', operation: 'send', accepted: true, status: 'completed' } }] });
+    const result = await fresh._registeredTools['reconcile_conversation_sends']!.handler!({ conversationId: conversation.id, observedReceipts: [{ idempotencyKey: 'key-mcp', receipt: { provider: 'opencode', nativeId: 'b', operation: 'send', accepted: true, status: 'completed' } }] });
     const payload = JSON.parse(result.content[0]!.text) as Array<{ resolved: boolean; message: { delivery: string } }>;
     assert.equal(payload[0]?.resolved, true);
     assert.equal(payload[0]?.message.delivery, 'completed');

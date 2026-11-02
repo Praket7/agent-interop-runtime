@@ -25,7 +25,7 @@ function mergeConfig(existing: string, config: string): string {
 async function atomicWrite(file: string, content: string): Promise<void> { const temp = `${file}.${process.pid}.tmp`; await fs.writeFile(temp, content, { encoding: 'utf8', mode: 0o600 }); await fs.rename(temp, file); }
 async function installConfig(write: boolean): Promise<void> {
   const launcher = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const config = `[mcp_servers.agent_interop]\ncommand = '${launcher}'\nargs = ['-y', 'agent-interop-runtime@${VERSION}', 'serve']\nenabled = true\n\n# Optional safe read-only entry for analysis sessions:\n# [mcp_servers.agent_interop_readonly]\n# command = '${launcher}'\n# args = ['-y', 'agent-interop-runtime@${VERSION}', 'serve']\n# enabled = true\n# [mcp_servers.agent_interop_readonly.env]\n# INTEROP_READ_ONLY = '1'\n\n# Optional trusted local verification authorization:\n# [mcp_servers.agent_interop.env]\n# INTEROP_ALLOW_VERIFICATION = '1'\n`;
+  const config = `[mcp_servers.agent_interop]\ncommand = '${launcher}'\nargs = ['-y', 'agent-interop-runtime@${VERSION}', 'serve', '--profile', 'minimal']\nenabled = true\n\n# Optional safe read-only entry for analysis sessions:\n# [mcp_servers.agent_interop_readonly]\n# command = '${launcher}'\n# args = ['-y', 'agent-interop-runtime@${VERSION}', 'serve', '--profile', 'minimal']\n# enabled = true\n# [mcp_servers.agent_interop_readonly.env]\n# INTEROP_READ_ONLY = '1'\n\n# Optional trusted local verification authorization:\n# [mcp_servers.agent_interop.env]\n# INTEROP_ALLOW_VERIFICATION = '1'\n`;
   const configPath = path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), 'config.toml');
   if (write) { let existing = ''; try { existing = await fs.readFile(configPath, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     // AI-09: validate before editing and validate the proposed result before replacement.
@@ -47,7 +47,7 @@ async function installCursor(write: boolean, project: boolean, readOnly: boolean
   try { current = JSON.parse(await fs.readFile(configPath, 'utf8')) as Record<string, unknown>; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cursor configuration is not valid JSON and was left unchanged: ${error instanceof Error ? error.message : String(error)}`); }
   const servers = current.mcpServers && typeof current.mcpServers === 'object' && !Array.isArray(current.mcpServers) ? current.mcpServers as Record<string, unknown> : {};
   // Deliberate pinning (section 4): a host must not silently change behavior at startup.
-  servers.agentInterop = { command: launcher, args: ['-y', `agent-interop-runtime@${VERSION}`, 'serve'], ...(readOnly ? { env: { INTEROP_READ_ONLY: '1' } } : {}) };
+  servers.agentInterop = { command: launcher, args: ['-y', `agent-interop-runtime@${VERSION}`, 'serve', '--profile', 'minimal'], ...(readOnly ? { env: { INTEROP_READ_ONLY: '1' } } : {}) };
   const next = JSON.stringify({ ...current, mcpServers: servers }, null, 2) + '\n';
   if (write) { await fs.mkdir(path.dirname(configPath), { recursive: true }); if (await fs.stat(configPath).catch(() => null) && !(await fs.stat(`${configPath}.bak`).catch(() => null))) await fs.copyFile(configPath, `${configPath}.bak`); await atomicWrite(configPath, next); console.log(`Installed Agent Interop in ${configPath}`); } else { console.log(next); console.log(`Run agent-interop-runtime cursor-setup --write to update ${configPath}`); }
 }

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createServer } from '../src/mcp.js';
@@ -14,15 +15,32 @@ const runtime = {
   sendMessage: async () => ({}), stop: async () => ({}), resume: async () => ({}), listModels: async () => ({}), setModel: async () => ({}), setReasoning: async () => ({}),
 };
 
-function tools(profile) { return Object.values(createServer(runtime, true, profile)._registeredTools); }
+function tools(profile) { return Object.entries(createServer(runtime, true, profile)._registeredTools); }
 function bytes(entries) { return entries.reduce((total, tool) => total + JSON.stringify({ title: tool.title, description: tool.description }).length, 0); }
 
-const measured = Object.fromEntries(['minimal','core','freebuff','legacy','full'].map((profile) => { const entries = tools(profile); return [profile, { tools: entries.length, descriptionBytes: bytes(entries) }]; }));
+const measured = Object.fromEntries(['minimal','core','freebuff','legacy','full'].map((profile) => { const entries = tools(profile).map(([, tool]) => tool); return [profile, { tools: entries.length, descriptionBytes: bytes(entries) }]; }));
 const failures = [];
-if (measured.minimal.tools > 16) failures.push(`minimal tool count regressed: ${measured.minimal.tools} > 16`);
-if (measured.core.tools > 38) failures.push(`core tool count regressed: ${measured.core.tools} > 38`);
-if (measured.freebuff.tools > 20) failures.push(`freebuff tool count regressed: ${measured.freebuff.tools} > 20`);
-if (measured.full.tools > 55) failures.push(`full tool count unexpectedly exceeds 55: ${measured.full.tools}`);
+if (measured.minimal.tools > 15) failures.push(`minimal profile exceeds the recommended 15-tool ceiling: ${measured.minimal.tools}`);
+if (measured.core.tools > 35) failures.push(`core profile exceeds its 35-tool budget: ${measured.core.tools}`);
+if (measured.freebuff.tools > 20) failures.push(`Freebuff profile exceeds its 20-tool budget: ${measured.freebuff.tools}`);
+if (measured.legacy.tools !== 52) failures.push(`legacy profile must preserve all 52 original tools: ${measured.legacy.tools}`);
+if (measured.full.tools > 52) failures.push(`modern full profile unexpectedly exceeds the 52-tool legacy surface: ${measured.full.tools}`);
+const modernNamePattern = /^(get|list|read|send|cancel|create|resume|set|stop|respond|reconcile|join|update|acquire|release|request|verify)_[a-z]+(?:_[a-z]+)*$/;
+for (const profile of ['minimal', 'core', 'freebuff', 'full']) {
+  for (const [name] of tools(profile)) {
+    if (!modernNamePattern.test(name)) failures.push(`${profile} contains inconsistent tool name: ${name}`);
+  }
+}
+const modernNames = new Set(tools('full').map(([name]) => name));
+const legacyNames = new Set(tools('legacy').map(([name]) => name));
+const migrationGuide = fs.readFileSync(new URL('../docs/migration-1.0.md', import.meta.url), 'utf8');
+const migrationRows = [...migrationGuide.matchAll(/^\| `([^`]+)` \| `([^`]+)` \|$/gm)].map((match) => [match[1], match[2]]);
+const migratedLegacyNames = new Set(migrationRows.map(([oldName]) => oldName));
+if (migratedLegacyNames.size !== migrationRows.length) failures.push('migration guide contains duplicate legacy tool names');
+if (migratedLegacyNames.size !== legacyNames.size || [...legacyNames].some((name) => !migratedLegacyNames.has(name))) failures.push('migration guide must map every legacy tool exactly once');
+for (const [oldName, modernName] of migrationRows) {
+  if (!modernNames.has(modernName)) failures.push(`migration guide maps ${oldName} to unavailable modern tool ${modernName}`);
+}
 if (!(measured.core.descriptionBytes < measured.full.descriptionBytes * 0.85)) failures.push('core descriptions must remain at least 15% smaller than full');
 if (!(measured.minimal.descriptionBytes < measured.core.descriptionBytes * 0.70)) failures.push('minimal descriptions must remain materially smaller than core');
 console.log(JSON.stringify(measured, null, 2));

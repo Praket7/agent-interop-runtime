@@ -1,5 +1,12 @@
 # Changelog
 
+# 1.0.0
+
+- Use a focused nine-tool catalog by default and retain the 0.3.x catalog through the `legacy` profile.
+- Standardize modern tool names, combine thread progress waiting and all-thread summaries, and use cursor-aware provider events as the single modern event API.
+- Clarify client connection choices and warn that remote hosts need their own provider installations and accounts.
+- Mark configured verification commands as potentially destructive.
+
 ## 0.3.2
 
 - Shorten MCP Registry description to meet its 100-character limit and publish the corrected registry metadata.
