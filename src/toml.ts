@@ -20,8 +20,8 @@ export function validateToml(text: string): TomlIssue[] {
     }
     const line = stripComment(rawLine);
     if (!line.trim()) return;
-    if (/^\s*\[\[/.test(line)) { if (!/^\s*\[\[[^\]"]+\]\]\s*$/.test(line)) issues.push({ line: lineNumber, message: `Malformed array-of-table header: ${line.trim()}` }); return; }
-    if (/^\s*\[/.test(line)) { if (!/^\s*\[[^\]"]+\]\s*$/.test(line)) issues.push({ line: lineNumber, message: `Malformed table header: ${line.trim()}` }); return; }
+    if (/^\s*\[\[/.test(line)) { const header = /^\s*\[\[(.*)\]\]\s*$/.exec(line); if (!header || !isValidKey(header[1]!)) issues.push({ line: lineNumber, message: `Malformed array-of-table header: ${line.trim()}` }); return; }
+    if (/^\s*\[/.test(line)) { const header = /^\s*\[(.*)\]\s*$/.exec(line); if (!header || !isValidKey(header[1]!)) issues.push({ line: lineNumber, message: `Malformed table header: ${line.trim()}` }); return; }
     if (!/^\s*[^=:#\s][^=]*=/.test(line)) { issues.push({ line: lineNumber, message: `Expected key = value, found: ${line.trim()}` }); return; }
     const valueStart = line.indexOf('=');
     const key = line.slice(0, valueStart).trim();
@@ -53,12 +53,34 @@ function stripComment(line: string): string {
 }
 
 function isValidKey(key: string): boolean {
-  return key.split('.').every((part) => {
+  const parts = splitDottedKey(key);
+  return parts !== undefined && parts.every((part) => {
     const trimmed = part.trim();
     if (!trimmed) return false;
-    if (/^"[^"]*"$/.test(trimmed) || /^'[^']*'$/.test(trimmed)) return true;
+    if (/^"([^"\\]|\\.)*"$/.test(trimmed) || /^'[^']*'$/.test(trimmed)) return true;
     return /^[A-Za-z0-9_-]+$/.test(trimmed);
   });
+}
+
+function splitDottedKey(key: string): string[] | undefined {
+  const parts: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let index = 0; index < key.length; index++) {
+    const char = key[index]!;
+    if (quote) {
+      if (quote === '"' && escaped) { escaped = false; continue; }
+      if (quote === '"' && char === '\\') { escaped = true; continue; }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '.') { parts.push(key.slice(start, index)); start = index + 1; }
+  }
+  if (quote || escaped) return undefined;
+  parts.push(key.slice(start));
+  return parts;
 }
 
 function validateValue(value: string): string | undefined {

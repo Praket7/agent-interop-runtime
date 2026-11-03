@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { ConversationStore } from '../src/conversations.js';
 import { WorkflowStore } from '../src/workflow.js';
 import { ProgressStore } from '../src/events.js';
@@ -269,6 +270,8 @@ test('AI-09: validateToml refuses malformed input and accepts nested tables', ()
   assert.equal(validateToml('not a toml line').length > 0, true);
   const valid = `[mcp_servers.agent_interop]\ncommand = 'npx'\nargs = ['-y', 'pkg@1.2.3', 'serve']\nenabled = true\n\n[mcp_servers.agent_interop.env]\nINTEROP_READ_ONLY = '1'\n`;
   assert.deepEqual(validateToml(valid), []);
+  const codexPluginTables = `[plugins."documents@openai-primary-runtime"]\nenabled = true\n\n[plugins."pdf@openai-primary-runtime"]\nenabled = true\n\n[plugins."plugin.with.dots@marketplace"]\nenabled = true\n`;
+  assert.deepEqual(validateToml(codexPluginTables), [], 'quoted plugin table names are valid TOML');
 });
 
 test('AI-09: install refuses to modify malformed config.toml byte-for-byte', async () => {
@@ -282,6 +285,30 @@ test('AI-09: install refuses to modify malformed config.toml byte-for-byte', asy
   await fs.writeFile(configPath, original, 'utf8'); // simulate refusal
   assert.equal(await fs.readFile(configPath, 'utf8'), original);
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('AI-09: Codex installer updates valid quoted-plugin config and preserves other servers', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-ai09-valid-'));
+  const configPath = path.join(dir, 'config.toml');
+  const original = `[plugins."documents@openai-primary-runtime"]\nenabled = true\n\n[mcp_servers.agent_interop]\ncommand = 'npx'\nargs = ['-y', 'agent-interop-runtime@latest', 'serve']\n\n[mcp_servers.freebuff]\ncommand = 'node'\nargs = ['freebuff']\n`;
+  await fs.writeFile(configPath, original, 'utf8');
+  try {
+    const cliPath = path.resolve('src/cli.ts');
+    const result = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'install', '--write'], {
+      cwd: process.cwd(),
+      env: { ...process.env, CODEX_HOME: dir },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const updated = await fs.readFile(configPath, 'utf8');
+    assert.ok(await fs.readFile(`${configPath}.bak`, 'utf8').then((backup) => backup === original), 'the original config should be backed up byte-for-byte');
+    assert.match(updated, /agent-interop-runtime@\d+\.\d+\.\d+'\s*,\s*'serve'\s*,\s*'--profile'\s*,\s*'minimal'/);
+    assert.match(updated, /\[plugins\."documents@openai-primary-runtime"\]\nenabled = true/);
+    assert.match(updated, /\[mcp_servers\.freebuff\]\ncommand = 'node'\nargs = \['freebuff'\]/);
+    assert.deepEqual(validateToml(updated), []);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------- AI-10: workflow concurrent evidence additions both survive ----------

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Accept valid quoted TOML table keys used by Codex plugin configurations so the installer can safely preserve and update real user config files.
+- Add an installer regression that checks valid plugin tables, byte-for-byte backup, minimal profile setup, and preservation of other MCP servers.
+
 ## 1.0.1
 
 - Fix the published MCP Registry description and reject descriptions over its 100-character limit before release.

@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "Coordinate coding agents through a local MCP runtime while keeping provider accounts and workspaces separate.",
   "keywords": [
