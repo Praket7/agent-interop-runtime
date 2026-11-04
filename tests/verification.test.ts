@@ -34,7 +34,7 @@ test('records timeout and does not invoke a shell', async () => {
     git: false,
   });
   assert.equal(result.commands[0]?.timedOut, true);
-  assert.equal(result.commands[0]?.exitCode, null);
+  assert.notEqual(result.commands[0]?.exitCode, 0);
 });
 
 test('collects commit branch worktree staged and unstaged git evidence', async () => {

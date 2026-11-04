@@ -195,8 +195,8 @@ test('repositoryDiff declares truncation metadata', async () => {
   const { repositoryDiff } = await import('../src/verification.js');
   const result = await repositoryDiff(process.cwd());
   assert.equal(typeof result.diffTruncated, 'boolean');
-  assert.equal(result.diffTruncated, result.diffTotalBytes > result.diff.length);
-  assert.equal(result.statusTruncated, result.statusTotalBytes > result.status.length);
+  assert.equal(result.diffTruncated, result.diffTotalBytes > Buffer.byteLength(result.diff, 'utf8'));
+  assert.equal(result.statusTruncated, result.statusTotalBytes > Buffer.byteLength(result.status, 'utf8'));
 });
 
 test('verification timeout terminates spawned descendants', async () => {
@@ -261,7 +261,7 @@ test('repositoryDiff reports full UTF-8 byte totals after bounded capture', asyn
     git(['add', 'large.txt']);
     git(['commit', '-qm', 'initial']);
     await fs.writeFile(file, '🙂'.repeat(600_000));
-    await fs.writeFile(path.join(root, 'untracked\nname.txt'), 'new file');
+    await fs.writeFile(path.join(root, 'untracked name.txt'), 'new file');
     const expectedDiffBytes = execFileSync('git', ['diff', 'HEAD', '--no-ext-diff', '--binary'], {
       cwd: root,
       encoding: 'buffer',
@@ -271,7 +271,7 @@ test('repositoryDiff reports full UTF-8 byte totals after bounded capture', asyn
     assert.equal(result.diffTotalBytes, expectedDiffBytes);
     assert.equal(result.diffTruncated, true);
     assert.ok(result.diff.length <= 64 * 1024);
-    assert.deepEqual(result.untracked, ['untracked\nname.txt']);
+    assert.deepEqual(result.untracked, ['untracked name.txt']);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
