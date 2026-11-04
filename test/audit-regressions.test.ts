@@ -1,29 +1,54 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import test from 'node:test';
+import {
+  ClaudeCodeAdapter,
+  isLoopbackHost,
+  OpenCodeAdapter,
+  opencodeAuthHeaders,
+  type RpcRequest,
+} from '../src/adapters.js';
 import { ConversationStore } from '../src/conversations.js';
-import { WorkflowStore } from '../src/workflow.js';
 import { ProgressStore } from '../src/events.js';
-import { OpenCodeAdapter, ClaudeCodeAdapter, isLoopbackHost, opencodeAuthHeaders, type RpcRequest } from '../src/adapters.js';
-import { redactString, redact } from '../src/security.js';
-import { validateToml } from '../src/toml.js';
+import { redact, redactString } from '../src/security.js';
 import { withStateLock } from '../src/state.js';
+import { validateToml } from '../src/toml.js';
 import { runVerification } from '../src/verification.js';
+import { WorkflowStore } from '../src/workflow.js';
 
 async function tmp(prefix: string): Promise<{ dir: string; file: string; cleanup: () => Promise<void> }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  return { dir, file: path.join(dir, 'state.json'), cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    file: path.join(dir, 'state.json'),
+    cleanup: () => fs.rm(dir, { recursive: true, force: true }),
+  };
 }
 
 function okRegistry() {
-  return { send: async (provider: string, nativeId: string, text: string) => ({ provider, nativeId, operation: 'send', accepted: true, status: 'queued', detail: { text } }) } as any;
+  return {
+    send: async (provider: string, nativeId: string, text: string) => ({
+      provider,
+      nativeId,
+      operation: 'send',
+      accepted: true,
+      status: 'queued',
+      detail: { text },
+    }),
+  } as any;
 }
 function failingRegistry() {
   let calls = 0;
-  return { calls: () => calls, send: async () => { calls += 1; throw new Error('connection reset during delivery'); } } as any;
+  return {
+    calls: () => calls,
+    send: async () => {
+      calls += 1;
+      throw new Error('connection reset during delivery');
+    },
+  } as any;
 }
 
 // ---------- AI-01: persist before send, delivery classification ----------
@@ -36,7 +61,11 @@ test('AI-01: outbound message is durable before dispatch and classified delivery
   await store.join(conversation.id, { provider: 'codex', nativeId: 'thread-1' });
   await store.join(conversation.id, { provider: 'claude-code', nativeId: 'session-2' });
   const registry = failingRegistry();
-  await assert.rejects(() => store.send(conversation.id, 'codex:thread-1', 'claude-code:session-2', 'possibly executed', registry), /delivery_unknown/);
+  await assert.rejects(
+    () =>
+      store.send(conversation.id, 'codex:thread-1', 'claude-code:session-2', 'possibly executed', registry),
+    /delivery_unknown/,
+  );
   assert.equal(registry.calls(), 1);
   // A fresh store reading the same file must see the message with delivery_unknown.
   const disk = new ConversationStore(file);
@@ -44,7 +73,11 @@ test('AI-01: outbound message is durable before dispatch and classified delivery
   const page = await disk.read(conversation.id);
   assert.equal(page.messages.length, 1);
   assert.equal(page.messages[0]?.delivery, 'delivery_unknown');
-  assert.equal(page.messages[0]?.receipt?.detail && (page.messages[0]!.receipt!.detail as Record<string, unknown>).classification, 'delivery_unknown');
+  assert.equal(
+    page.messages[0]?.receipt?.detail &&
+      (page.messages[0]!.receipt!.detail as Record<string, unknown>).classification,
+    'delivery_unknown',
+  );
   await cleanup();
 });
 
@@ -54,7 +87,8 @@ test('AI-02: two independent stores preserve both creations on one state file', 
   const { file, cleanup } = await tmp('interop-ai02-');
   const a = new ConversationStore(file);
   const b = new ConversationStore(file);
-  await a.load(); await b.load();
+  await a.load();
+  await b.load();
   const first = await a.create('first');
   const second = await b.create('second');
   const disk = new ConversationStore(file);
@@ -92,7 +126,10 @@ test('AI-03: reading across the 500/501 boundary neither duplicates nor strands 
   // 501st message triggers trimming of the first message; the cursor must keep working.
   await store.send(conversation.id, 'codex:t', 'codex:t', 'message-501', registry);
   const page = await store.read(conversation.id, cursor, 100);
-  assert.equal(page.messages.some((m) => m.text === 'message-501'), true);
+  assert.equal(
+    page.messages.some((m) => m.text === 'message-501'),
+    true,
+  );
   // Gap is declared for a cursor that predates retention (message 1 was trimmed).
   const stale = await store.read(conversation.id, 0, 100);
   assert.ok(stale.gap && stale.gap.from === 1 && stale.gap.to === 1, 'retention gap must be explicit');
@@ -107,7 +144,12 @@ test('AI-04: repeatedly passing the returned cursor delivers every event exactly
   let cursor = 0;
   const delivered: number[] = [];
   for (let i = 0; i < 5; i++) {
-    store.append({ threadId: 't', timestamp: new Date().toISOString(), kind: 'turn_state', state: 'running' });
+    store.append({
+      threadId: 't',
+      timestamp: new Date().toISOString(),
+      kind: 'turn_state',
+      state: 'running',
+    });
     const page = store.read('t', cursor);
     for (const e of page.events) delivered.push(e.sequence);
     cursor = page.next ?? cursor;
@@ -126,7 +168,11 @@ test('AI-05: a connected stream with fresh activity is not stale, a quiet expire
   store.setConnected(true);
   // Simulate an old last-activity timestamp by appending an event stamped in the past and
   // checking that noteActivity-based health is what matters.
-  store.append({ threadId: 't', timestamp: new Date(Date.now() - 200_000).toISOString(), kind: 'turn_state' });
+  store.append({
+    threadId: 't',
+    timestamp: new Date(Date.now() - 200_000).toISOString(),
+    kind: 'turn_state',
+  });
   // No transport activity since connection: after STALE window the stream reads stale...
   const staleSnapshot = store.read('t');
   assert.equal(staleSnapshot.connected, true);
@@ -159,20 +205,35 @@ test('AI-06: nested properties.info.sessionID and properties.part.sessionID are 
   ];
   globalThis.fetch = async (input, init) => {
     requests.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
-    const body = new ReadableStream<Uint8Array>({ start(controller) { for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame)); controller.close(); } });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+        controller.close();
+      },
+    });
     return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
   try {
     const adapter = new OpenCodeAdapter('http://127.0.0.1:4096');
     const events: Array<{ type: string; data: unknown }> = [];
-    for await (const event of adapter.events('session-a')) { events.push({ type: event.type, data: event.data }); if (events.length >= 3) break; }
+    for await (const event of adapter.events('session-a')) {
+      events.push({ type: event.type, data: event.data });
+      if (events.length >= 3) break;
+    }
     assert.equal(events.length, 3, `expected exactly 3 attributable events, got ${events.length}`);
     for (const event of events) {
-      const sessionId = (event.data as { properties?: { sessionID?: string; info?: { sessionID?: string }; part?: { sessionID?: string } } });
-      const attributed = sessionId.properties?.sessionID ?? sessionId.properties?.info?.sessionID ?? sessionId.properties?.part?.sessionID;
+      const sessionId = event.data as {
+        properties?: { sessionID?: string; info?: { sessionID?: string }; part?: { sessionID?: string } };
+      };
+      const attributed =
+        sessionId.properties?.sessionID ??
+        sessionId.properties?.info?.sessionID ??
+        sessionId.properties?.part?.sessionID;
       assert.equal(attributed, 'session-a');
     }
-  } finally { globalThis.fetch = previousFetch; }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 // ---------- AI-07: password-only SSE auth and shared endpoint policy ----------
@@ -186,36 +247,71 @@ test('AI-07: password-only configuration sends Basic auth on the event stream to
   const headers: Array<Record<string, string>> = [];
   globalThis.fetch = async (_input, init) => {
     headers.push((init?.headers ?? {}) as Record<string, string>);
-    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('event: message.updated\ndata: {"type":"message.updated","properties":{"sessionID":"session-a"}}\n\n')); controller.close(); } });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            'event: message.updated\ndata: {"type":"message.updated","properties":{"sessionID":"session-a"}}\n\n',
+          ),
+        );
+        controller.close();
+      },
+    });
     return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
   try {
     const adapter = new OpenCodeAdapter('http://127.0.0.1:4096');
     for await (const _event of adapter.events('session-a')) break;
-    assert.equal(headers[0]?.authorization, `Basic ${Buffer.from('opencode:audit-placeholder-password').toString('base64')}`);
+    assert.equal(
+      headers[0]?.authorization,
+      `Basic ${Buffer.from('opencode:audit-placeholder-password').toString('base64')}`,
+    );
   } finally {
     globalThis.fetch = previousFetch;
-    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME; else process.env.OPENCODE_SERVER_USERNAME = previousUser;
-    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD; else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME;
+    else process.env.OPENCODE_SERVER_USERNAME = previousUser;
+    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
+    else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
   }
 });
 
 test('AI-07: remote endpoints still require credentials and loopback normalization is shared', () => {
   assert.equal(isLoopbackHost('127.0.0.1'), true);
+  assert.equal(isLoopbackHost('127.0.0.2'), true);
   assert.equal(isLoopbackHost('localhost'), true);
   assert.equal(isLoopbackHost('::1'), true);
   assert.equal(isLoopbackHost('[::1]'), true);
+  assert.equal(isLoopbackHost('::ffff:127.0.0.1'), true);
+  assert.equal(isLoopbackHost('127.999.0.1'), false);
   assert.equal(isLoopbackHost('example.invalid'), false);
   const previousUser = process.env.OPENCODE_SERVER_USERNAME;
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
   delete process.env.OPENCODE_SERVER_USERNAME;
   process.env.OPENCODE_SERVER_PASSWORD = 'audit-placeholder-password';
   try {
-    assert.ok(opencodeAuthHeaders().authorization, 'password alone must authenticate');
+    assert.equal(
+      opencodeAuthHeaders().authorization,
+      undefined,
+      'credentials are not emitted without an endpoint binding',
+    );
+    assert.equal(
+      opencodeAuthHeaders('https://example.invalid:4096', 'https://example.invalid:4096').authorization,
+      `Basic ${Buffer.from('opencode:audit-placeholder-password').toString('base64')}`,
+    );
+    assert.equal(
+      opencodeAuthHeaders('http://127.0.0.1:4096', 'https://example.invalid:4096').authorization,
+      undefined,
+      'credentials must not cross to another endpoint',
+    );
     const adapter = new OpenCodeAdapter('http://example.invalid:4096');
-    assert.equal(adapter['remoteWithoutAuth'], false, 'remote with password must not count as unauthenticated');
+    assert.equal(
+      adapter['remoteWithoutAuth'],
+      false,
+      'remote with password must not count as unauthenticated',
+    );
   } finally {
-    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME; else process.env.OPENCODE_SERVER_USERNAME = previousUser;
+    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME;
+    else process.env.OPENCODE_SERVER_USERNAME = previousUser;
     delete process.env.OPENCODE_SERVER_PASSWORD;
   }
 });
@@ -227,11 +323,26 @@ test('verification refuses cwd symlinks that resolve outside the workspace', asy
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-cwd-outside-'));
   try {
     await fs.symlink(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
-    await assert.rejects(() => runVerification({ cwd: root, git: false, commands: { test: { executable: 'node', args: ['--version'], cwd: 'escape' } } }), /escapes/);
+    await assert.rejects(
+      () =>
+        runVerification({
+          cwd: root,
+          git: false,
+          commands: { test: { executable: 'node', args: ['--version'], cwd: 'escape' } },
+        }),
+      /escapes/,
+    );
     await fs.mkdir(path.join(root, 'inside'));
-    const result = await runVerification({ cwd: root, git: false, commands: { test: { executable: 'node', args: ['--version'], cwd: 'inside' } } });
+    const result = await runVerification({
+      cwd: root,
+      git: false,
+      commands: { test: { executable: 'node', args: ['--version'], cwd: 'inside' } },
+    });
     assert.equal(result.commands[0]?.exitCode, 0);
-  } finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
 });
 
 test('AI-08: a fifth failing command blocks verification and quoted arguments survive', async () => {
@@ -241,22 +352,31 @@ test('AI-08: a fifth failing command blocks verification and quoted arguments su
   const work = await store.createWork({ objective: 'run five checks', acceptanceCriteria: ['all pass'] });
   // Nine commands exceed the documented limit of 8 and are rejected before anything runs.
   await assert.rejects(
-    () => store.verify(work.id, process.cwd(), Array.from({ length: 9 }, () => ({ executable: 'node', args: ['--version'] }))),
+    () =>
+      store.verify(
+        work.id,
+        process.cwd(),
+        Array.from({ length: 9 }, () => ({ executable: 'node', args: ['--version'] })),
+      ),
     /at most 8/,
   );
   // Within the limit, all five run: the fifth failing command blocks.
   const result = await store.verify(work.id, process.cwd(), [
-    { executable: 'node', args: ['--version'] }, { executable: 'node', args: ['--version'] },
-    { executable: 'node', args: ['--version'] }, { executable: 'node', args: ['--version'] },
+    { executable: 'node', args: ['--version'] },
+    { executable: 'node', args: ['--version'] },
+    { executable: 'node', args: ['--version'] },
+    { executable: 'node', args: ['--version'] },
     { executable: 'node', args: ['-e', 'process.exit(1)'] },
   ]);
   assert.equal(result[0]!.commands.length, 5, 'all five accepted commands must execute');
   assert.equal(result[0]!.commands[4]!.exitCode, 1);
   assert.equal((await store.getWork(work.id))?.status, 'blocked');
   // Quoted arguments survive intact via the structured form.
-  const quoted = await store.verify(work.id, process.cwd(), [{ executable: 'node', args: ['-e', 'console.log("a b  c")'] }]);
+  const quoted = await store.verify(work.id, process.cwd(), [
+    { executable: 'node', args: ['-e', 'console.log("a b  c")'] },
+  ]);
   assert.equal(quoted[0]!.commands[0]!.exitCode, 0);
-  assert.match(quoted[0]!.commands[0]!.stdout, /a b  c/);
+  assert.match(quoted[0]!.commands[0]!.stdout, /a b {2}c/);
   const evidence = await store.listEvidence(work.id);
   assert.equal(evidence.length, 6, 'every accepted command needs an evidence record (5 + 1)');
   await cleanup();
@@ -301,8 +421,14 @@ test('AI-09: Codex installer updates valid quoted-plugin config and preserves ot
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const updated = await fs.readFile(configPath, 'utf8');
-    assert.ok(await fs.readFile(`${configPath}.bak`, 'utf8').then((backup) => backup === original), 'the original config should be backed up byte-for-byte');
-    assert.match(updated, /agent-interop-runtime@\d+\.\d+\.\d+'\s*,\s*'serve'\s*,\s*'--profile'\s*,\s*'minimal'/);
+    assert.ok(
+      await fs.readFile(`${configPath}.bak`, 'utf8').then((backup) => backup === original),
+      'the original config should be backed up byte-for-byte',
+    );
+    assert.match(
+      updated,
+      /agent-interop-runtime@\d+\.\d+\.\d+'\s*,\s*'serve'\s*,\s*'--profile'\s*,\s*'minimal'/,
+    );
     assert.match(updated, /\[plugins\."documents@openai-primary-runtime"\]\nenabled = true/);
     assert.match(updated, /\[mcp_servers\.freebuff\]\ncommand = 'node'\nargs = \['freebuff'\]/);
     assert.deepEqual(validateToml(updated), []);
@@ -317,12 +443,29 @@ test('AI-10: two stores adding evidence preserve both references', async () => {
   const { file, cleanup } = await tmp('interop-ai10-');
   const a = new WorkflowStore(file);
   const b = new WorkflowStore(file);
-  await a.load(); await b.load();
+  await a.load();
+  await b.load();
   const work = await a.createWork({ objective: 'shared', acceptanceCriteria: ['c'] });
   // Give B the work record as A sees it, then have each add evidence.
   await b.load();
-  const evidenceA = await a.addEvidence({ workId: work.id, sessionId: 'codex:t', kind: 'diff', trust: 'agent_claim', source: { adapter: 'codex' }, summary: 'A', data: { side: 'a' } });
-  const evidenceB = await b.addEvidence({ workId: work.id, sessionId: 'codex:t', kind: 'diff', trust: 'agent_claim', source: { adapter: 'codex' }, summary: 'B', data: { side: 'b' } });
+  const evidenceA = await a.addEvidence({
+    workId: work.id,
+    sessionId: 'codex:t',
+    kind: 'diff',
+    trust: 'agent_claim',
+    source: { adapter: 'codex' },
+    summary: 'A',
+    data: { side: 'a' },
+  });
+  const evidenceB = await b.addEvidence({
+    workId: work.id,
+    sessionId: 'codex:t',
+    kind: 'diff',
+    trust: 'agent_claim',
+    source: { adapter: 'codex' },
+    summary: 'B',
+    data: { side: 'b' },
+  });
   const disk = new WorkflowStore(file);
   await disk.load();
   const evidence = await disk.listEvidence(work.id);
@@ -330,7 +473,10 @@ test('AI-10: two stores adding evidence preserve both references', async () => {
   assert.ok(ids.includes(evidenceA.id), 'evidence A lost');
   assert.ok(ids.includes(evidenceB.id), 'evidence B lost');
   const workAfter = await disk.getWork(work.id);
-  assert.ok(workAfter && workAfter.evidenceIds.includes(evidenceA.id) && workAfter.evidenceIds.includes(evidenceB.id), 'evidence references lost');
+  assert.ok(
+    workAfter && workAfter.evidenceIds.includes(evidenceA.id) && workAfter.evidenceIds.includes(evidenceB.id),
+    'evidence references lost',
+  );
   await cleanup();
 });
 
@@ -343,14 +489,19 @@ test('AI-11: fake credentials never survive string, nested, or multiline diagnos
   const basic = redactString('authorization: Basic YXVkaXQtcGxhY2Vob2xkZXI=, other=data');
   assert.equal(basic.includes('YXVkaXQtcGxhY2Vob2xkZXI='), false);
   assert.equal(basic.includes('other=data'), true, 'nonsensitive trailing text must remain');
-  const nested = redact({ headers: { authorization: 'Bearer audit-placeholder-secret' }, apiKey: 'audit-placeholder-key' });
+  const nested = redact({
+    headers: { authorization: 'Bearer audit-placeholder-secret' },
+    apiKey: 'audit-placeholder-key',
+  });
   const serialized = JSON.stringify(nested);
   assert.equal(serialized.includes('audit-placeholder-secret'), false);
   assert.equal(serialized.includes('audit-placeholder-key'), false);
   const multiline = redactString('step 1 ok\nauthorization: Bearer audit-placeholder-secret\nstep 2 ok');
   assert.equal(multiline.includes('audit-placeholder-secret'), false);
   assert.match(multiline, /step 1 ok/);
-  const keyBlock = redactString('-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----');
+  const keyBlock = redactString(
+    '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----',
+  );
   assert.equal(keyBlock.includes('abc'), false);
 });
 
@@ -366,7 +517,11 @@ test('AI-13: minimal session/new response keeps the requested cwd through resume
   const created = await adapter.createSession({ cwd: '/audit-tmp/workspace-a' });
   assert.equal(created.cwd, path.resolve('/audit-tmp/workspace-a'), 'cwd lost on minimal create');
   const resumed = await adapter.resumeSession('session-min');
-  assert.equal(resumed.cwd, path.resolve('/audit-tmp/workspace-a'), 'resume must not fall back to process.cwd()');
+  assert.equal(
+    resumed.cwd,
+    path.resolve('/audit-tmp/workspace-a'),
+    'resume must not fall back to process.cwd()',
+  );
   assert.notEqual(resumed.cwd, process.cwd());
 });
 
@@ -376,14 +531,19 @@ test('AI-15: readiness files with remote URLs are rejected before credential-bea
   const { isLoopbackHttpUrlCheck: isLoopbackHttpUrl } = await import('../src/runtime.js');
   const fetchCalls: string[] = [];
   const previousFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => { fetchCalls.push(String(input)); throw new Error('network must not be reached'); };
+  globalThis.fetch = async (input) => {
+    fetchCalls.push(String(input));
+    throw new Error('network must not be reached');
+  };
   try {
     assert.equal(isLoopbackHttpUrl('http://audit-example.invalid:1234'), false);
     assert.equal(isLoopbackHttpUrl('http://127.0.0.1:55360'), true);
     assert.equal(isLoopbackHttpUrl('https://[::1]:8443'), true);
     assert.equal(isLoopbackHttpUrl('http://127.0.0.1.evil.example:80'), false);
     assert.equal(fetchCalls.length, 0);
-  } finally { globalThis.fetch = previousFetch; }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 // ---------- Section 4: initialization gating and stale-lock recovery ----------
@@ -395,11 +555,27 @@ test('section 4: conversation operations gate on load; a lock left by a dead pro
   const conversation = await store.create('gated');
   assert.notEqual(conversation.id, undefined);
   // A lock file from a dead PID must not block persistence forever.
-  await fs.writeFile(`${file}.lock`, JSON.stringify({ pid: 999999999, host: 'dead-host', acquiredAt: new Date(Date.now() - 60_000).toISOString(), owner: 'crashed' }), 'utf8');
+  await fs.writeFile(
+    `${file}.lock`,
+    JSON.stringify({
+      pid: 999999999,
+      host: 'dead-host',
+      acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      owner: 'crashed',
+    }),
+    'utf8',
+  );
   const recovered = new ConversationStore(file);
   const created = await recovered.create('after-crash');
   assert.notEqual(created.id, undefined);
-  await fs.access(`${file}.lock`, fs.constants.F_OK).then(() => { throw new Error('lock should be released after recovery'); }).catch((error) => { if (error && !(error as NodeJS.ErrnoException).code) throw error; });
+  await fs
+    .access(`${file}.lock`, fs.constants.F_OK)
+    .then(() => {
+      throw new Error('lock should be released after recovery');
+    })
+    .catch((error) => {
+      if (error && !(error as NodeJS.ErrnoException).code) throw error;
+    });
   await cleanup();
 });
 
@@ -407,12 +583,14 @@ test('section 4: withStateLock serializes concurrent writers without data loss',
   const { file, cleanup } = await tmp('interop-lock-');
   const writes: Promise<void>[] = [];
   for (let i = 0; i < 10; i++) {
-    writes.push(withStateLock(file, `writer-${i}`, async () => {
-      const current = JSON.parse(await fs.readFile(file, 'utf8').catch(() => '{}')) as { count?: number };
-      await new Promise((r) => setTimeout(r, 5));
-      current.count = (current.count ?? 0) + 1;
-      await fs.writeFile(file, JSON.stringify(current), 'utf8');
-    }));
+    writes.push(
+      withStateLock(file, `writer-${i}`, async () => {
+        const current = JSON.parse(await fs.readFile(file, 'utf8').catch(() => '{}')) as { count?: number };
+        await new Promise((r) => setTimeout(r, 5));
+        current.count = (current.count ?? 0) + 1;
+        await fs.writeFile(file, JSON.stringify(current), 'utf8');
+      }),
+    );
   }
   await Promise.all(writes);
   const final = JSON.parse(await fs.readFile(file, 'utf8')) as { count: number };
@@ -427,17 +605,35 @@ test('section 4: file-backed nested transaction (createReview → addEvidence) d
   const work = await store.createWork({ objective: 'nested tx', acceptanceCriteria: ['c'] });
   const started = Date.now();
   // createReview composes addEvidence inside one lock; this must complete quickly.
-  const review = await store.createReview({ workId: work.id, subjectEvidenceIds: [], reviewerSessionId: 'codex:r1', independence: { differentSession: true, differentProvider: false, freshContext: true, writeAccess: false }, findings: [], verdict: 'approve' });
+  const review = await store.createReview({
+    workId: work.id,
+    subjectEvidenceIds: [],
+    reviewerSessionId: 'codex:r1',
+    independence: {
+      differentSession: true,
+      differentProvider: false,
+      freshContext: true,
+      writeAccess: false,
+    },
+    findings: [],
+    verdict: 'approve',
+  });
   assert.ok(Date.now() - started < 5_000, 'nested transaction must not wait out the lock lease');
   const disk = new WorkflowStore(file);
   await disk.load();
   assert.ok((await disk.listReviews(work.id)).some((r) => r.id === review.id));
-  assert.equal((await disk.listEvidence(work.id)).some((e) => e.trust === 'agent_claim'), true);
+  assert.equal(
+    (await disk.listEvidence(work.id)).some((e) => e.trust === 'agent_claim'),
+    true,
+  );
   await cleanup();
 });
 
 function mockRpc(responses: Record<string, unknown>) {
   const calls: Array<{ method: string; params: unknown }> = [];
-  const rpc: RpcRequest = async (method, params) => { calls.push({ method, params }); return responses[method] ?? {}; };
+  const rpc: RpcRequest = async (method, params) => {
+    calls.push({ method, params });
+    return responses[method] ?? {};
+  };
   return { rpc, calls };
 }

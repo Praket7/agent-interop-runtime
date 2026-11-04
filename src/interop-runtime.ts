@@ -1,11 +1,39 @@
-import type { Json } from './types.js';
 import { randomUUID } from 'node:crypto';
-import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, EvidenceRecord, OperationReceipt, ProviderId, WorkGraphSnapshot, AgentSendOptions, ModelSelection } from './interop.js';
+import type {
+  AgentAdapter,
+  AgentCapabilities,
+  AgentEvent,
+  AgentSendOptions,
+  AgentSession,
+  EvidenceRecord,
+  ModelSelection,
+  OperationReceipt,
+  ProviderId,
+  WorkGraphSnapshot,
+} from './interop.js';
+import type { Json } from './types.js';
 
-export interface EventConsumer { delivered: Set<number>; waiters: Array<(event: AgentEvent | null) => void> }
-export interface EventBuffer { history: AgentEvent[]; consumers: EventConsumer[]; epoch: number; closed?: boolean }
+export interface EventConsumer {
+  delivered: Set<number>;
+  waiters: Array<(event: AgentEvent | null) => void>;
+}
+export interface EventBuffer {
+  history: AgentEvent[];
+  consumers: EventConsumer[];
+  epoch: number;
+  closed?: boolean;
+  lastReadAt: number;
+  controller: AbortController;
+  stop?: () => void;
+}
 const EVENT_BUFFER_MAX = 200;
-export function normalizeProviderId(provider: ProviderId, id: string): string { const prefix = `${provider}:`; return id.startsWith(prefix) ? id.slice(prefix.length) : id; }
+const EVENT_STREAM_MAX = 128;
+const EVENT_STREAM_IDLE_MS = 5 * 60_000;
+const EVENT_METADATA_MAX = 1_024;
+export function normalizeProviderId(provider: ProviderId, id: string): string {
+  const prefix = `${provider}:`;
+  return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+}
 
 export class InteropRegistry {
   private adapters = new Map<ProviderId, AgentAdapter>();
@@ -17,29 +45,197 @@ export class InteropRegistry {
   /** Registry-owned cursors survive provider stream reconnects even when native iterators reset. */
   private readonly eventSequences = new Map<string, number>();
   private readonly eventEpochs = new Map<string, number>();
-  register(adapter: AgentAdapter) { this.adapters.set(adapter.id, adapter); return this; }
-  listProviders(): ProviderId[] { return [...this.adapters.keys()]; }
-  adapter(provider: ProviderId) { const value = this.adapters.get(provider); if (!value) throw new Error(`Unknown provider ${provider}`); return value; }
-  async capabilities(): Promise<AgentCapabilities[]> {
-    return Promise.all([...this.adapters.values()].map(async (adapter) => {
-      try { return await adapter.capabilities(); }
-      catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        const unavailable = { supported: false, state: 'unavailable' as const, reason };
-        return { provider: adapter.id, adapterVersion: 'unknown', authorization: 'unknown' as const, discovery: unavailable, sessions: unavailable, sendMessage: unavailable, steer: unavailable, cancel: unavailable, events: unavailable, diff: unavailable, permissions: unavailable, model: unavailable, reasoning: unavailable, limitations: [`Capability probe failed: ${reason}`] };
-      }
-    }));
+  register(adapter: AgentAdapter) {
+    this.adapters.set(adapter.id, adapter);
+    return this;
   }
-  async listSessions(provider?: ProviderId): Promise<AgentSession[]> { const run = this.discoveryQueue.then(async () => { this.sessionErrors = []; const adapters = provider ? [this.adapter(provider)] : [...this.adapters.values()]; const results = await Promise.all(adapters.map(async (adapter) => { try { return await adapter.listSessions(); } catch (error) { this.sessionErrors.push({ provider: adapter.id, error: error instanceof Error ? error.message : String(error) }); return []; } })); const sessions = results.flat(); for (const s of sessions) this.capture({ id: `${s.provider}:${s.nativeId}`, provider: s.provider, nativeId: s.nativeId, kind: 'session', capturedAt: new Date().toISOString(), trust: 'native', summary: s.title ?? 'Native session discovered', data: s as unknown as Json }); return sessions; }); this.discoveryQueue = run.then(() => undefined, () => undefined); return run; }
-  getSessionErrors(): Array<{ provider: ProviderId; error: string }> { return [...this.sessionErrors]; }
-  async send(provider: ProviderId, nativeId: string, text: string, mode: 'send' | 'steer' = 'send', options?: AgentSendOptions): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const adapter = this.adapter(provider); const fn = mode === 'steer' ? adapter.steer : adapter.send; if (!fn) throw new Error(`${provider} does not support ${mode}`); const result = await fn.call(adapter, nativeId, text, options); this.capture({ id: `${Date.now()}-${randomUUID()}`, provider, nativeId, kind: 'event', capturedAt: new Date().toISOString(), trust: 'observed', summary: `${mode} ${result.status ?? (result.accepted ? 'accepted' : 'rejected')}`, data: result.detail ?? null }); return result; }
-  async cancel(provider: ProviderId, nativeId: string): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const fn = this.adapter(provider).cancel; if (!fn) throw new Error(`${provider} does not support cancel`); return fn.call(this.adapter(provider), nativeId); }
-  async create(provider: ProviderId, options: { cwd?: string; title?: string }): Promise<AgentSession> { const fn = this.adapter(provider).createSession; if (!fn) throw new Error(`${provider} does not support session creation`); return fn.call(this.adapter(provider), options); }
-  async resume(provider: ProviderId, nativeId: string): Promise<AgentSession> { nativeId = normalizeProviderId(provider, nativeId); const adapter = this.adapter(provider); const session = adapter.resumeSession ? await adapter.resumeSession(nativeId) : await adapter.getSession(nativeId); if (!session) throw new Error(`${provider} could not resume ${nativeId}`); return session; }
-  async permission(provider: ProviderId, nativeId: string, requestId: string, decision: string): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const fn = this.adapter(provider).respondPermission; if (!fn) throw new Error(`${provider} does not support permission responses`); return fn.call(this.adapter(provider), nativeId, requestId, decision); }
-  async model(provider: ProviderId, nativeId: string, model: ModelSelection): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const fn = this.adapter(provider).setModel; if (!fn) throw new Error(`${provider} does not support model changes`); return fn.call(this.adapter(provider), nativeId, model); }
-  async reasoning(provider: ProviderId, nativeId: string, effort: string): Promise<OperationReceipt> { nativeId = normalizeProviderId(provider, nativeId); const fn = this.adapter(provider).setReasoning; if (!fn) throw new Error(`${provider} does not support reasoning changes`); return fn.call(this.adapter(provider), nativeId, effort); }
-  async diff(provider: ProviderId, nativeId: string): Promise<Json | null> { nativeId = normalizeProviderId(provider, nativeId); const fn = this.adapter(provider).getDiff; if (!fn) throw new Error(`${provider} does not expose native diff`); const result = await fn.call(this.adapter(provider), nativeId); this.capture({ id: `${Date.now()}-${randomUUID()}`, provider, nativeId, kind: 'diff', capturedAt: new Date().toISOString(), trust: 'native', summary: 'Native diff read', data: result ?? null }); return result; }
+  listProviders(): ProviderId[] {
+    return [...this.adapters.keys()];
+  }
+  adapter(provider: ProviderId) {
+    const value = this.adapters.get(provider);
+    if (!value) throw new Error(`Unknown provider ${provider}`);
+    return value;
+  }
+  async capabilities(): Promise<AgentCapabilities[]> {
+    return Promise.all(
+      [...this.adapters.values()].map(async (adapter) => {
+        try {
+          return await adapter.capabilities();
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          const unavailable = { supported: false, state: 'unavailable' as const, reason };
+          return {
+            provider: adapter.id,
+            adapterVersion: 'unknown',
+            authorization: 'unknown' as const,
+            discovery: unavailable,
+            sessions: unavailable,
+            sendMessage: unavailable,
+            steer: unavailable,
+            cancel: unavailable,
+            events: unavailable,
+            diff: unavailable,
+            permissions: unavailable,
+            model: unavailable,
+            reasoning: unavailable,
+            limitations: [`Capability probe failed: ${reason}`],
+          };
+        }
+      }),
+    );
+  }
+  async listSessions(provider?: ProviderId): Promise<AgentSession[]> {
+    const run = this.discoveryQueue.then(async () => {
+      this.sessionErrors = [];
+      const adapters = provider ? [this.adapter(provider)] : [...this.adapters.values()];
+      const results = await Promise.all(
+        adapters.map(async (adapter) => {
+          try {
+            return await adapter.listSessions();
+          } catch (error) {
+            this.sessionErrors.push({
+              provider: adapter.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return [];
+          }
+        }),
+      );
+      const sessions = results.flat();
+      for (const s of sessions)
+        this.capture({
+          id: `${s.provider}:${s.nativeId}`,
+          provider: s.provider,
+          nativeId: s.nativeId,
+          kind: 'session',
+          capturedAt: new Date().toISOString(),
+          trust: 'native',
+          summary: s.title ?? 'Native session discovered',
+          data: s as unknown as Json,
+        });
+      return sessions;
+    });
+    this.discoveryQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+  getSessionErrors(): Array<{ provider: ProviderId; error: string }> {
+    return [...this.sessionErrors];
+  }
+  private setBoundedMetadata(map: Map<string, number>, key: string, value: number): void {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > EVENT_METADATA_MAX) map.delete(map.keys().next().value!);
+  }
+  private closeEventBuffer(key: string, buffer: EventBuffer): void {
+    buffer.closed = true;
+    buffer.controller.abort();
+    buffer.stop?.();
+    for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(null);
+    if (this.eventBuffers.get(key) === buffer) this.eventBuffers.delete(key);
+  }
+  private pruneEventBuffers(now: number): void {
+    for (const [key, buffer] of this.eventBuffers) {
+      if (buffer.closed || (!buffer.consumers.length && now - buffer.lastReadAt >= EVENT_STREAM_IDLE_MS))
+        this.closeEventBuffer(key, buffer);
+    }
+  }
+  private makeEventBufferRoom(): void {
+    if (this.eventBuffers.size < EVENT_STREAM_MAX) return;
+    const oldestIdle = [...this.eventBuffers].find(([, buffer]) => buffer.consumers.length === 0);
+    if (oldestIdle) this.closeEventBuffer(oldestIdle[0], oldestIdle[1]);
+    if (this.eventBuffers.size >= EVENT_STREAM_MAX)
+      throw new Error(
+        `Provider event stream limit reached (${EVENT_STREAM_MAX}); retry after another event read finishes`,
+      );
+  }
+  async send(
+    provider: ProviderId,
+    nativeId: string,
+    text: string,
+    mode: 'send' | 'steer' = 'send',
+    options?: AgentSendOptions,
+  ): Promise<OperationReceipt> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const adapter = this.adapter(provider);
+    const fn = mode === 'steer' ? adapter.steer : adapter.send;
+    if (!fn) throw new Error(`${provider} does not support ${mode}`);
+    const result = await fn.call(adapter, nativeId, text, options);
+    this.capture({
+      id: `${Date.now()}-${randomUUID()}`,
+      provider,
+      nativeId,
+      kind: 'event',
+      capturedAt: new Date().toISOString(),
+      trust: 'observed',
+      summary: `${mode} ${result.status ?? (result.accepted ? 'accepted' : 'rejected')}`,
+      data: result.detail ?? null,
+    });
+    return result;
+  }
+  async cancel(provider: ProviderId, nativeId: string): Promise<OperationReceipt> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const fn = this.adapter(provider).cancel;
+    if (!fn) throw new Error(`${provider} does not support cancel`);
+    return fn.call(this.adapter(provider), nativeId);
+  }
+  async create(provider: ProviderId, options: { cwd?: string; title?: string }): Promise<AgentSession> {
+    const fn = this.adapter(provider).createSession;
+    if (!fn) throw new Error(`${provider} does not support session creation`);
+    return fn.call(this.adapter(provider), options);
+  }
+  async resume(provider: ProviderId, nativeId: string): Promise<AgentSession> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const adapter = this.adapter(provider);
+    const session = adapter.resumeSession
+      ? await adapter.resumeSession(nativeId)
+      : await adapter.getSession(nativeId);
+    if (!session) throw new Error(`${provider} could not resume ${nativeId}`);
+    return session;
+  }
+  async permission(
+    provider: ProviderId,
+    nativeId: string,
+    requestId: string,
+    decision: string,
+  ): Promise<OperationReceipt> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const fn = this.adapter(provider).respondPermission;
+    if (!fn) throw new Error(`${provider} does not support permission responses`);
+    return fn.call(this.adapter(provider), nativeId, requestId, decision);
+  }
+  async model(provider: ProviderId, nativeId: string, model: ModelSelection): Promise<OperationReceipt> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const fn = this.adapter(provider).setModel;
+    if (!fn) throw new Error(`${provider} does not support model changes`);
+    return fn.call(this.adapter(provider), nativeId, model);
+  }
+  async reasoning(provider: ProviderId, nativeId: string, effort: string): Promise<OperationReceipt> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const fn = this.adapter(provider).setReasoning;
+    if (!fn) throw new Error(`${provider} does not support reasoning changes`);
+    return fn.call(this.adapter(provider), nativeId, effort);
+  }
+  async diff(provider: ProviderId, nativeId: string): Promise<Json | null> {
+    nativeId = normalizeProviderId(provider, nativeId);
+    const fn = this.adapter(provider).getDiff;
+    if (!fn) throw new Error(`${provider} does not expose native diff`);
+    const result = await fn.call(this.adapter(provider), nativeId);
+    this.capture({
+      id: `${Date.now()}-${randomUUID()}`,
+      provider,
+      nativeId,
+      kind: 'diff',
+      capturedAt: new Date().toISOString(),
+      trust: 'native',
+      summary: 'Native diff read',
+      data: result ?? null,
+    });
+    return result;
+  }
   /**
    * AI-14: event reads are count-bounded AND time-bounded, served from ONE shared
    * per-session subscription so repeated polls reuse the same buffer instead of opening
@@ -48,18 +244,39 @@ export class InteropRegistry {
    * back to continue exactly where the previous read stopped), then the read waits
    * (bounded by timeoutMs) for additional events.
    */
-  async readEvents(provider: ProviderId, nativeId: string, limit = 50, timeoutMs = 5_000, afterSequence = 0): Promise<AgentEvent[]> {
+  async readEvents(
+    provider: ProviderId,
+    nativeId: string,
+    limit = 50,
+    timeoutMs = 5_000,
+    afterSequence = 0,
+    signal?: AbortSignal,
+  ): Promise<AgentEvent[]> {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
     nativeId = normalizeProviderId(provider, nativeId);
     const fn = this.adapter(provider).events;
     if (!fn) throw new Error(`${provider} does not expose native events`);
     const bufferKey = `${provider}:${nativeId}`;
+    const requestedAt = Date.now();
+    this.pruneEventBuffers(requestedAt);
     let buffer = this.eventBuffers.get(bufferKey);
     if (!buffer || buffer.closed) {
+      this.makeEventBufferRoom();
       const epoch = (this.eventEpochs.get(bufferKey) ?? 0) + 1;
-      this.eventEpochs.set(bufferKey, epoch);
-      buffer = { history: [], consumers: [], epoch };
+      this.setBoundedMetadata(this.eventEpochs, bufferKey, epoch);
+      buffer = {
+        history: [],
+        consumers: [],
+        epoch,
+        lastReadAt: requestedAt,
+        controller: new AbortController(),
+      };
       this.eventBuffers.set(bufferKey, buffer);
       void this.pumpEvents(provider, nativeId, bufferKey, buffer);
+    } else {
+      buffer.lastReadAt = requestedAt;
+      this.eventBuffers.delete(bufferKey);
+      this.eventBuffers.set(bufferKey, buffer);
     }
     const boundedLimit = Math.max(1, Math.min(limit, 100));
     const consumer: EventConsumer = { delivered: new Set<number>(), waiters: [] };
@@ -78,11 +295,24 @@ export class InteropRegistry {
       // Bounded wait for further live events up to the count limit.
       while (events.length < boundedLimit && Date.now() < deadline) {
         const remaining = deadline - Date.now();
-        const next = await new Promise<AgentEvent | null>((resolve) => {
+        const next = await new Promise<AgentEvent | null>((resolve, reject) => {
           // Keep the timer referenced: an unref'd deadline can leave a standalone caller
           // (e.g. the benchmark script) awaiting forever once other loop work drains.
-          const timer = setTimeout(() => resolve(null), Math.max(remaining, 0));
-          consumer.waiters.push((event) => { clearTimeout(timer); resolve(event); });
+          const finish = (event: AgentEvent | null) => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', cancel);
+            resolve(event);
+          };
+          const cancel = () => {
+            clearTimeout(timer);
+            reject(signal?.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+          };
+          const timer = setTimeout(() => finish(null), Math.max(remaining, 0));
+          consumer.waiters.push((event) => {
+            finish(event);
+          });
+          signal?.addEventListener('abort', cancel, { once: true });
+          if (signal?.aborted) cancel();
         });
         if (!next) break;
         if (consumer.delivered.has(next.sequence)) continue;
@@ -97,9 +327,24 @@ export class InteropRegistry {
     return events;
   }
 
-  async readEventPage(provider: ProviderId, nativeId: string, limit = 50, timeoutMs = 5_000, afterSequence = 0): Promise<{ events: AgentEvent[]; next: number; oldestSequence?: number; latestSequence: number; epoch: number; gap?: { from: number; to: number }; streamClosed: boolean }> {
+  async readEventPage(
+    provider: ProviderId,
+    nativeId: string,
+    limit = 50,
+    timeoutMs = 5_000,
+    afterSequence = 0,
+    signal?: AbortSignal,
+  ): Promise<{
+    events: AgentEvent[];
+    next: number;
+    oldestSequence?: number;
+    latestSequence: number;
+    epoch: number;
+    gap?: { from: number; to: number };
+    streamClosed: boolean;
+  }> {
     nativeId = normalizeProviderId(provider, nativeId);
-    const events = await this.readEvents(provider, nativeId, limit, timeoutMs, afterSequence);
+    const events = await this.readEvents(provider, nativeId, limit, timeoutMs, afterSequence, signal);
     const key = `${provider}:${nativeId}`;
     const buffer = this.eventBuffers.get(key);
     const oldestSequence = buffer?.history[0]?.sequence;
@@ -111,25 +356,39 @@ export class InteropRegistry {
       ...(oldestSequence !== undefined ? { oldestSequence } : {}),
       latestSequence,
       epoch: buffer?.epoch ?? this.eventEpochs.get(key) ?? 0,
-      ...(oldestSequence !== undefined && afterSequence + 1 < oldestSequence ? { gap: { from: afterSequence + 1, to: oldestSequence - 1 } } : {}),
+      ...(oldestSequence !== undefined && afterSequence + 1 < oldestSequence
+        ? { gap: { from: afterSequence + 1, to: oldestSequence - 1 } }
+        : {}),
       streamClosed: buffer?.closed ?? true,
     };
   }
 
   /** Single background pump per provider session: adapter events fan out to all consumers. */
-  private async pumpEvents(provider: ProviderId, nativeId: string, bufferKey: string, buffer: EventBuffer): Promise<void> {
+  private async pumpEvents(
+    provider: ProviderId,
+    nativeId: string,
+    bufferKey: string,
+    buffer: EventBuffer,
+  ): Promise<void> {
     try {
-      const iterator = this.adapter(provider).events!(nativeId)[Symbol.asyncIterator]();
+      const iterator = this.adapter(provider).events!(nativeId, buffer.controller.signal)[
+        Symbol.asyncIterator
+      ]();
+      buffer.stop = () => {
+        void iterator.return?.().catch(() => undefined);
+      };
       for (;;) {
         if (buffer.closed) return;
         const next = await iterator.next();
         if (next.done || buffer.closed) return;
         const sequence = (this.eventSequences.get(bufferKey) ?? 0) + 1;
-        this.eventSequences.set(bufferKey, sequence);
+        this.setBoundedMetadata(this.eventSequences, bufferKey, sequence);
         const event: AgentEvent = { ...next.value, provider, nativeId, sequence };
         buffer.history.push(event);
-        if (buffer.history.length > EVENT_BUFFER_MAX) buffer.history.splice(0, buffer.history.length - EVENT_BUFFER_MAX);
-        for (const consumer of buffer.consumers) for (const waiter of consumer.waiters.splice(0)) waiter(event);
+        if (buffer.history.length > EVENT_BUFFER_MAX)
+          buffer.history.splice(0, buffer.history.length - EVENT_BUFFER_MAX);
+        for (const consumer of buffer.consumers)
+          for (const waiter of consumer.waiters.splice(0)) waiter(event);
       }
     } catch {
       // A provider stream is allowed to terminate or reconnect. The buffer MUST become
@@ -141,15 +400,57 @@ export class InteropRegistry {
     }
   }
   /** Section 4 gap: surface pending provider permission requests for human visibility. */
-  pendingPermissions(): Array<{ provider: ProviderId; requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> {
-    const out: Array<{ provider: ProviderId; requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> = [];
+  pendingPermissions(): Array<{
+    provider: ProviderId;
+    requestId: string;
+    nativeId: string;
+    method: string;
+    options: Json;
+    requestedAt: string;
+  }> {
+    const out: Array<{
+      provider: ProviderId;
+      requestId: string;
+      nativeId: string;
+      method: string;
+      options: Json;
+      requestedAt: string;
+    }> = [];
     for (const adapter of this.adapters.values()) {
-      const surfaced = adapter as Partial<AgentAdapter> & { listPendingPermissions?: () => Array<{ requestId: string; nativeId: string; method: string; options: Json; requestedAt: string }> };
-      for (const pending of surfaced.listPendingPermissions?.() ?? []) out.push({ provider: adapter.id, ...pending });
+      const surfaced = adapter as Partial<AgentAdapter> & {
+        listPendingPermissions?: () => Array<{
+          requestId: string;
+          nativeId: string;
+          method: string;
+          options: Json;
+          requestedAt: string;
+        }>;
+      };
+      for (const pending of surfaced.listPendingPermissions?.() ?? [])
+        out.push({ provider: adapter.id, ...pending });
     }
     return out;
   }
-  capture(record: EvidenceRecord) { this.evidence.push(record); if (this.evidence.length > 1000) this.evidence.splice(0, this.evidence.length - 1000); }
-  async graph(): Promise<WorkGraphSnapshot> { return { sessions: await this.listSessions(), edges: this.evidence.map((e) => ({ from: `${e.provider}:${e.nativeId}`, to: e.id, kind: 'evidence' as const })), evidence: [...this.evidence] }; }
-  dispose() { for (const adapter of this.adapters.values()) adapter.dispose?.(); for (const buffer of this.eventBuffers.values()) buffer.closed = true; this.eventBuffers.clear(); this.eventSequences.clear(); this.eventEpochs.clear(); }
+  capture(record: EvidenceRecord) {
+    this.evidence.push(record);
+    if (this.evidence.length > 1000) this.evidence.splice(0, this.evidence.length - 1000);
+  }
+  async graph(): Promise<WorkGraphSnapshot> {
+    return {
+      sessions: await this.listSessions(),
+      edges: this.evidence.map((e) => ({
+        from: `${e.provider}:${e.nativeId}`,
+        to: e.id,
+        kind: 'evidence' as const,
+      })),
+      evidence: [...this.evidence],
+    };
+  }
+  dispose() {
+    for (const adapter of this.adapters.values()) adapter.dispose?.();
+    for (const [key, buffer] of this.eventBuffers) this.closeEventBuffer(key, buffer);
+    this.eventBuffers.clear();
+    this.eventSequences.clear();
+    this.eventEpochs.clear();
+  }
 }

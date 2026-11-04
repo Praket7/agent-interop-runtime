@@ -1,6 +1,12 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter, CursorAdapter, type RpcRequest } from '../src/adapters.js';
+import test from 'node:test';
+import {
+  ClaudeCodeAdapter,
+  CodexAdapter,
+  CursorAdapter,
+  OpenCodeAdapter,
+  type RpcRequest,
+} from '../src/adapters.js';
 import { FreebuffAdapter } from '../src/freebuff-adapter.js';
 
 function mockRpc(responses: Record<string, unknown>) {
@@ -25,14 +31,33 @@ test('Codex App Server adapter initializes and maps native thread operations', a
   const caps = await adapter.capabilities();
   assert.equal(caps.discovery.supported, true);
   assert.equal(caps.sendMessage.supported, true);
-  assert.deepEqual((await adapter.listSessions()).map((s) => s.nativeId), ['thread-1']);
+  assert.deepEqual(
+    (await adapter.listSessions()).map((s) => s.nativeId),
+    ['thread-1'],
+  );
   const session = await adapter.createSession({ cwd: 'C:/repo', title: 'New work' });
   assert.equal(session.nativeId, 'thread-2');
-  assert.equal((await adapter.send('thread-2', 'hello', { model: { providerID: 'openai', modelID: 'gpt-5.6' }, reasoning: 'high' })).accepted, true);
+  assert.equal(
+    (
+      await adapter.send('thread-2', 'hello', {
+        model: { providerID: 'openai', modelID: 'gpt-5.6' },
+        reasoning: 'high',
+      })
+    ).accepted,
+    true,
+  );
   assert.equal((await adapter.cancel('thread-2')).accepted, true);
-  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'thread/list', 'thread/start', 'turn/start', 'turn/interrupt']);
+  assert.deepEqual(
+    mock.calls.map((call) => call.method),
+    ['initialize', 'thread/list', 'thread/start', 'turn/start', 'turn/interrupt'],
+  );
   assert.deepEqual(mock.calls[2]?.params, { cwd: 'C:/repo', name: 'New work' });
-  assert.deepEqual(mock.calls[3]?.params, { threadId: 'thread-2', input: [{ type: 'text', text: 'hello' }], model: 'gpt-5.6', effort: 'high' });
+  assert.deepEqual(mock.calls[3]?.params, {
+    threadId: 'thread-2',
+    input: [{ type: 'text', text: 'hello' }],
+    model: 'gpt-5.6',
+    effort: 'high',
+  });
 });
 
 test('Claude ACP adapter uses session/new prompt and cancel', async () => {
@@ -51,13 +76,22 @@ test('Claude ACP adapter uses session/new prompt and cancel', async () => {
   // a no-reply provider does not time out.
   assert.equal((await adapter.cancel('session-1')).accepted, true);
   assert.equal(mock.calls.filter((call) => call.method === 'session/cancel').length, 0);
-  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'session/new', 'session/prompt']);
-  assert.deepEqual(mock.calls[2]?.params, { sessionId: 'session-1', prompt: [{ type: 'text', text: 'inspect this' }] });
+  assert.deepEqual(
+    mock.calls.map((call) => call.method),
+    ['initialize', 'session/new', 'session/prompt'],
+  );
+  assert.deepEqual(mock.calls[2]?.params, {
+    sessionId: 'session-1',
+    prompt: [{ type: 'text', text: 'inspect this' }],
+  });
 });
 
 test('Claude ACP exposes persisted sessions and applies model and reasoning separately', async () => {
   const mock = mockRpc({
-    initialize: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { list: {}, resume: {} } } },
+    initialize: {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true, sessionCapabilities: { list: {}, resume: {} } },
+    },
     'session/list': { sessions: [{ sessionId: 'old-1', title: 'Existing Claude work', cwd: 'C:/repo' }] },
     'session/set_config_option': {},
     'session/prompt': {},
@@ -67,18 +101,31 @@ test('Claude ACP exposes persisted sessions and applies model and reasoning sepa
   assert.equal(caps.model.supported, false);
   assert.equal(caps.model.state, 'degraded');
   assert.equal(caps.reasoning.supported, false);
-  assert.deepEqual((await adapter.listSessions()).map((s) => s.nativeId), ['old-1']);
-  const receipt = await adapter.send('old-1', 'read the files', { model: { providerID: 'anthropic', modelID: 'claude-sonnet' }, reasoning: 'high' });
+  assert.deepEqual(
+    (await adapter.listSessions()).map((s) => s.nativeId),
+    ['old-1'],
+  );
+  const receipt = await adapter.send('old-1', 'read the files', {
+    model: { providerID: 'anthropic', modelID: 'claude-sonnet' },
+    reasoning: 'high',
+  });
   assert.equal(receipt.accepted, true);
-  assert.deepEqual(mock.calls.filter((call) => call.method === 'session/set_config_option').map((call) => call.params), [
-    { sessionId: 'old-1', configId: 'model', type: 'id', value: 'claude-sonnet' },
-    { sessionId: 'old-1', configId: 'thought_level', type: 'id', value: 'high' },
-  ]);
+  assert.deepEqual(
+    mock.calls.filter((call) => call.method === 'session/set_config_option').map((call) => call.params),
+    [
+      { sessionId: 'old-1', configId: 'model', type: 'id', value: 'claude-sonnet' },
+      { sessionId: 'old-1', configId: 'thought_level', type: 'id', value: 'high' },
+    ],
+  );
 });
 
 test('Cursor ACP authenticates through cursor_login and keeps mode separate from model', async () => {
   const mock = mockRpc({
-    initialize: { protocolVersion: 1, authMethods: [{ methodId: 'cursor_login' }], agentCapabilities: { sessionCapabilities: { list: {} } } },
+    initialize: {
+      protocolVersion: 1,
+      authMethods: [{ methodId: 'cursor_login' }],
+      agentCapabilities: { sessionCapabilities: { list: {} } },
+    },
     authenticate: {},
     'session/new': { sessionId: 'cursor-1', cwd: 'C:/repo' },
     'session/set_config_option': {},
@@ -87,16 +134,63 @@ test('Cursor ACP authenticates through cursor_login and keeps mode separate from
   const adapter = new CursorAdapter({ rpc: mock.rpc });
   const session = await adapter.createSession({ cwd: 'C:/repo' });
   assert.equal(session.id, 'cursor:cursor-1');
-  assert.equal((await adapter.send('cursor-1', 'inspect this', { model: { providerID: 'cursor', modelID: 'auto' }, agent: 'plan' })).accepted, true);
-  assert.deepEqual(mock.calls.map((call) => call.method), ['initialize', 'authenticate', 'session/new', 'session/set_config_option', 'session/set_config_option', 'session/prompt']);
-  assert.deepEqual(mock.calls[3]?.params, { sessionId: 'cursor-1', configId: 'mode', type: 'id', value: 'plan' });
+  assert.equal(
+    (
+      await adapter.send('cursor-1', 'inspect this', {
+        model: { providerID: 'cursor', modelID: 'auto' },
+        agent: 'plan',
+      })
+    ).accepted,
+    true,
+  );
+  assert.deepEqual(
+    mock.calls.map((call) => call.method),
+    [
+      'initialize',
+      'authenticate',
+      'session/new',
+      'session/set_config_option',
+      'session/set_config_option',
+      'session/prompt',
+    ],
+  );
+  assert.deepEqual(mock.calls[3]?.params, {
+    sessionId: 'cursor-1',
+    configId: 'mode',
+    type: 'id',
+    value: 'plan',
+  });
 });
 
 test('Freebuff unified sends apply model and reasoning to the exact native session', async () => {
   const calls: string[] = [];
-  const runtime = { capabilities: async () => ({ product: 'cli', signedIn: 'unknown', orchestrator: false, readOnly: false, endpoints: ['managed PTY'], notes: [] }), sendMessage: async (id: string, text: string) => { calls.push(`send:${id}:${text}`); return { id, text }; }, setModel: async (id: string, model: string) => { calls.push(`model:${id}:${model}`); return { id, model }; }, setReasoning: async (id: string, effort: string) => { calls.push(`reasoning:${id}:${effort}`); return { id, effort }; } } as any;
+  const runtime = {
+    capabilities: async () => ({
+      product: 'cli',
+      signedIn: 'unknown',
+      orchestrator: false,
+      readOnly: false,
+      endpoints: ['managed PTY'],
+      notes: [],
+    }),
+    sendMessage: async (id: string, text: string) => {
+      calls.push(`send:${id}:${text}`);
+      return { id, text };
+    },
+    setModel: async (id: string, model: string) => {
+      calls.push(`model:${id}:${model}`);
+      return { id, model };
+    },
+    setReasoning: async (id: string, effort: string) => {
+      calls.push(`reasoning:${id}:${effort}`);
+      return { id, effort };
+    },
+  } as any;
   const adapter = new FreebuffAdapter(runtime);
-  const receipt = await adapter.send('chat-1', 'inspect files', { model: { providerID: 'freebuff', modelID: 'sonnet' }, reasoning: 'high' });
+  const receipt = await adapter.send('chat-1', 'inspect files', {
+    model: { providerID: 'freebuff', modelID: 'sonnet' },
+    reasoning: 'high',
+  });
   assert.equal(receipt.accepted, true);
   assert.deepEqual(calls, ['model:chat-1:sonnet', 'reasoning:chat-1:high', 'send:chat-1:inspect files']);
 });
@@ -115,73 +209,173 @@ test('native adapters degrade honestly when their process cannot be started', as
 test('OpenCode accepts a 204 prompt response without parsing JSON', async () => {
   const previousFetch = globalThis.fetch;
   const requests: Array<{ url: string; init?: RequestInit }> = [];
-  globalThis.fetch = async (input, init) => { requests.push({ url: String(input), init }); return new Response(null, { status: 204 }); };
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), init });
+    return new Response(null, { status: 204 });
+  };
   try {
     const adapter = new OpenCodeAdapter();
-    const receipt = await adapter.send('session-1', 'hello', { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build' });
+    const receipt = await adapter.send('session-1', 'hello', {
+      model: { providerID: 'opencode', modelID: 'big-pickle' },
+      agent: 'build',
+    });
     assert.equal(receipt.accepted, true);
     assert.equal(receipt.status, 'queued');
     const sent = JSON.parse(String(requests[0]?.init?.body));
-    assert.deepEqual(sent, { model: { providerID: 'opencode', modelID: 'big-pickle' }, agent: 'build', parts: [{ type: 'text', text: 'hello' }] });
-  } finally { globalThis.fetch = previousFetch; }
+    assert.deepEqual(sent, {
+      model: { providerID: 'opencode', modelID: 'big-pickle' },
+      agent: 'build',
+      parts: [{ type: 'text', text: 'hello' }],
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode does not replay a prompt when the provider may have accepted it', async () => {
   const previousFetch = globalThis.fetch;
   let posts = 0;
-  globalThis.fetch = async (_input, init) => { if (init?.method === 'POST') posts += 1; throw new Error('response lost after acceptance'); };
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'POST') posts += 1;
+    throw new Error('response lost after acceptance');
+  };
   try {
     await assert.rejects(() => new OpenCodeAdapter().send('session-1', 'one prompt'), /delivery_unknown/);
     assert.equal(posts, 1);
-  } finally { globalThis.fetch = previousFetch; }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode marks a server error on a mutation as uncertain without replay', async () => {
   const previousFetch = globalThis.fetch;
   let posts = 0;
-  globalThis.fetch = async (_input, init) => { if (init?.method === 'POST') posts += 1; return new Response('provider failed after processing', { status: 503 }); };
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'POST') posts += 1;
+    return new Response('provider failed after processing', { status: 503 });
+  };
   try {
     await assert.rejects(() => new OpenCodeAdapter().send('session-1', 'one prompt'), /delivery_unknown/);
     assert.equal(posts, 1);
-  } finally { globalThis.fetch = previousFetch; }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode keeps a discovered session bound to its original server endpoint', async () => {
   const previousFetch = globalThis.fetch;
   const urls: string[] = [];
-  globalThis.fetch = async (input, init) => { urls.push(String(input)); return init?.method === 'GET' ? Response.json({ id: 'session-1' }) : new Response(null, { status: 204 }); };
+  globalThis.fetch = async (input, init) => {
+    urls.push(String(input));
+    return init?.method === 'GET' ? Response.json({ id: 'session-1' }) : new Response(null, { status: 204 });
+  };
   try {
     const adapter = new OpenCodeAdapter('http://127.0.0.1:4096');
     await adapter.getSession('session-1');
     (adapter as unknown as { base: URL }).base = new URL('http://127.0.0.1:49999');
     await adapter.send('session-1', 'hello');
     await adapter.getDiff('session-1');
-    assert.deepEqual(urls.map((url) => new URL(url).port), ['4096', '4096', '4096']);
-  } finally { globalThis.fetch = previousFetch; }
+    assert.deepEqual(
+      urls.map((url) => new URL(url).port),
+      ['4096', '4096', '4096'],
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode retries the alternate model identity for older or newer API shapes', async () => {
   const previousFetch = globalThis.fetch;
   const bodies: unknown[] = [];
-  globalThis.fetch = async (_input, init) => { bodies.push(JSON.parse(String(init?.body))); return bodies.length === 1 ? new Response(JSON.stringify({ message: 'expected id' }), { status: 400 }) : new Response(null, { status: 204 }); };
-  try { const receipt = await new OpenCodeAdapter().send('session-1', 'hello', { model: { providerID: 'opencode', modelID: 'big-pickle' } }); assert.equal(receipt.accepted, true); assert.deepEqual(bodies, [{ model: { providerID: 'opencode', modelID: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] }, { model: { providerID: 'opencode', id: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] }]); }
-  finally { globalThis.fetch = previousFetch; }
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return bodies.length === 1
+      ? new Response(JSON.stringify({ message: 'expected id' }), { status: 400 })
+      : new Response(null, { status: 204 });
+  };
+  try {
+    const receipt = await new OpenCodeAdapter().send('session-1', 'hello', {
+      model: { providerID: 'opencode', modelID: 'big-pickle' },
+    });
+    assert.equal(receipt.accepted, true);
+    assert.deepEqual(bodies, [
+      { model: { providerID: 'opencode', modelID: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] },
+      { model: { providerID: 'opencode', id: 'big-pickle' }, parts: [{ type: 'text', text: 'hello' }] },
+    ]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode rejects malformed session discovery instead of treating it as empty', async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ sessions: [] }), { status: 200 });
-  try { await assert.rejects(() => new OpenCodeAdapter().listSessions(), /malformed response/); }
-  finally { globalThis.fetch = previousFetch; }
+  try {
+    await assert.rejects(() => new OpenCodeAdapter().listSessions(), /malformed response/);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('OpenCode sends configured Basic Auth without exposing the password', async () => {
   const previousFetch = globalThis.fetch;
   const previousUser = process.env.OPENCODE_SERVER_USERNAME;
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
-  process.env.OPENCODE_SERVER_USERNAME = 'alice'; process.env.OPENCODE_SERVER_PASSWORD = 'secret';
+  const previousUrl = process.env.OPENCODE_SERVER_URL;
+  process.env.OPENCODE_SERVER_URL = 'http://127.0.0.1:4096';
+  process.env.OPENCODE_SERVER_USERNAME = 'alice';
+  process.env.OPENCODE_SERVER_PASSWORD = 'secret';
   let authorization = '';
-  globalThis.fetch = async (_input, init) => { authorization = String((init?.headers as Record<string, string>)?.authorization); return new Response(JSON.stringify({ healthy: true }), { status: 200 }); };
-  try { const caps = await new OpenCodeAdapter().capabilities(); assert.equal(caps.discovery.supported, true); assert.equal(authorization, `Basic ${Buffer.from('alice:secret').toString('base64')}`); }
-  finally { globalThis.fetch = previousFetch; if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME; else process.env.OPENCODE_SERVER_USERNAME = previousUser; if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD; else process.env.OPENCODE_SERVER_PASSWORD = previousPassword; }
+  globalThis.fetch = async (_input, init) => {
+    authorization = String((init?.headers as Record<string, string>)?.authorization);
+    return new Response(JSON.stringify({ healthy: true }), { status: 200 });
+  };
+  try {
+    const caps = await new OpenCodeAdapter().capabilities();
+    assert.equal(caps.discovery.supported, true);
+    assert.equal(authorization, `Basic ${Buffer.from('alice:secret').toString('base64')}`);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+    else process.env.OPENCODE_SERVER_URL = previousUrl;
+    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME;
+    else process.env.OPENCODE_SERVER_USERNAME = previousUser;
+    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
+    else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+  }
+});
+
+test('OpenCode does not send configured credentials to unconfigured loopback listeners', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousUrl = process.env.OPENCODE_SERVER_URL;
+  const previousUser = process.env.OPENCODE_SERVER_USERNAME;
+  const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  delete process.env.OPENCODE_SERVER_URL;
+  process.env.OPENCODE_SERVER_USERNAME = 'alice';
+  process.env.OPENCODE_SERVER_PASSWORD = 'secret';
+  const observed: Array<{ url: string; authorization?: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    observed.push({
+      url: String(input),
+      authorization: (init?.headers as Record<string, string> | undefined)?.authorization,
+    });
+    if (String(input).includes(':4096/')) throw new Error('configured default endpoint is offline');
+    return new Response(JSON.stringify({ healthy: true }), { status: 200 });
+  };
+  try {
+    await new OpenCodeAdapter().capabilities();
+    assert.ok(observed.length > 0);
+    assert.ok(
+      observed.every((request) => request.authorization === undefined),
+      'credentials must stay off endpoints that were not configured',
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+    else process.env.OPENCODE_SERVER_URL = previousUrl;
+    if (previousUser === undefined) delete process.env.OPENCODE_SERVER_USERNAME;
+    else process.env.OPENCODE_SERVER_USERNAME = previousUser;
+    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
+    else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+  }
 });

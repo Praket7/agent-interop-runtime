@@ -1,7 +1,7 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { InMemoryProvider, DuplicateReadCounter, countBytes, countPayloadTokens } from './shared.js';
-import { runTask, runBenchmark } from './harness.js';
+import test from 'node:test';
+import { runBenchmark, runTask } from './harness.js';
+import { countBytes, countPayloadTokens, DuplicateReadCounter, InMemoryProvider } from './shared.js';
 
 test('benchmark: in-memory providers observe their own sends (delivery correlation ground truth)', async () => {
   const provider = new InMemoryProvider('codex', 'Bench', [{ nativeId: 's1' }]);
@@ -41,7 +41,10 @@ test('benchmark task: implement-utils completes with exactly one provider send a
   assert.equal(result.duplicateProviderSends, 0, 'delivery must be exactly-once at the coordinator level');
   assert.equal(result.providerObservedSends, 1);
   assert.equal(result.duplicateReads, 0, 'cursor-driven observation must never redeliver an event');
-  assert.ok(['in_progress', 'accepted', 'blocked'].includes(result.finalState), `unexpected terminal state ${result.finalState}`);
+  assert.ok(
+    ['in_progress', 'accepted', 'blocked'].includes(result.finalState),
+    `unexpected terminal state ${result.finalState}`,
+  );
   assert.ok(result.payloadBytes > 0 && result.tokens > 0);
 });
 
@@ -77,10 +80,10 @@ test('benchmark: shared per-session subscription survives repeated polls without
   const registry = new InteropRegistry().register(provider);
   let streamCount = 0;
   const originalEvents = provider.events.bind(provider);
-  (provider as { events: typeof provider.events }).events = function (nativeId: string) {
+  (provider as { events: typeof provider.events }).events = ((nativeId: string) => {
     streamCount += 1;
     return originalEvents(nativeId);
-  } as typeof provider.events;
+  }) as typeof provider.events;
   provider.emit('poll-1', { type: 'a', data: {} });
   provider.emit('poll-1', { type: 'b', data: {} });
   const first = await registry.readEvents('codex', 'poll-1', 10, 200);
@@ -90,6 +93,10 @@ test('benchmark: shared per-session subscription survives repeated polls without
   assert.equal(streamCount, 1, 'repeated polls must reuse one subscription');
   provider.emit('poll-1', { type: 'c', data: {} });
   const third = await registry.readEvents('codex', 'poll-1', 10, 200, firstCursor);
-  assert.deepEqual(third.map((e) => e.type), ['c'], 'only events after the cursor are delivered');
+  assert.deepEqual(
+    third.map((e) => e.type),
+    ['c'],
+    'only events after the cursor are delivered',
+  );
   registry.dispose();
 });

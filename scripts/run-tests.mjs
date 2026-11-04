@@ -4,9 +4,10 @@
  * shells without globstar/quote handling handle inconsistently. Works identically on
  * Node 20/22/24/26 across macOS/Linux/Windows.
  */
+
+import { spawnSync } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -16,8 +17,15 @@ async function collect(dir) {
   return entries.filter((e) => e.isFile() && e.name.endsWith('.test.ts')).map((e) => path.join(dir, e.name));
 }
 
-const files = [...await collect('test'), ...await collect('tests'), ...await collect(path.join('test', 'benchmark'))].sort();
-if (!files.length) { console.error('No test files found'); process.exit(1); }
+const files = [
+  ...(await collect('test')),
+  ...(await collect('tests')),
+  ...(await collect(path.join('test', 'benchmark'))),
+].sort();
+if (!files.length) {
+  console.error('No test files found');
+  process.exit(1);
+}
 
 const result = spawnSync(process.execPath, ['--test', '--import', 'tsx', ...files], {
   stdio: 'inherit',

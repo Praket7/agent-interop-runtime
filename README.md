@@ -58,6 +58,10 @@ Codex uses the Codex app server, while Claude Code and Cursor use their supporte
 
 The available features depend on the provider version, local setup, and account state, and most protocol checks use simulated providers rather than live sessions. Check the provider on the computer that will run the MCP server before relying on it for live work.
 
+## MCP protocol support
+
+The server supports the 2026-07-28 MCP protocol and the earlier 2025-11-25 protocol, so newer clients can negotiate the per-request protocol while existing clients keep their session-based connection. This works over stdio and Streamable HTTP, and both versions receive the same selected tools and provider behavior.
+
 ## Choose the tools your client sees
 
 The runtime starts with a focused set of nine tools, so a new MCP connection can find providers, inspect and control sessions, read events, and cancel or resume work without loading the larger coordination catalog. You can choose a larger set when your work needs shared conversations, evidence, handoffs, or Freebuff specific controls, and you can keep the original 0.3.x names while migrating an existing client.
@@ -75,11 +79,11 @@ The modern profiles use predictable verb first names, and related progress opera
 Choose a profile on the server command, or set `INTEROP_TOOLS_PROFILE` when your client configuration cannot pass an argument.
 
 ```sh
-npx -y agent-interop-runtime@1.0.2 serve --profile minimal
-npx -y agent-interop-runtime@1.0.2 serve --profile core
-npx -y agent-interop-runtime@1.0.2 serve --profile freebuff
-npx -y agent-interop-runtime@1.0.2 serve --profile full
-npx -y agent-interop-runtime@1.0.2 serve --profile legacy
+npx -y agent-interop-runtime@1.1.0 serve --profile minimal
+npx -y agent-interop-runtime@1.1.0 serve --profile core
+npx -y agent-interop-runtime@1.1.0 serve --profile freebuff
+npx -y agent-interop-runtime@1.1.0 serve --profile full
+npx -y agent-interop-runtime@1.1.0 serve --profile legacy
 ```
 
 Read only mode removes tools that change provider or coordination state, and it can be enabled by setting `INTEROP_READ_ONLY=1` in the server environment.
@@ -112,7 +116,7 @@ The runtime talks to provider apps and tools installed on the same computer, so 
 The installer adds or repairs the local Codex entry, backs up the existing configuration before changing it, and preserves unrelated settings.
 
 ```sh
-npx -y agent-interop-runtime@1.0.2 install --write
+npx -y agent-interop-runtime@1.1.0 install --write
 ```
 
 ### Cursor
@@ -120,7 +124,7 @@ npx -y agent-interop-runtime@1.0.2 install --write
 The Cursor installer writes a project independent entry in your user configuration, and `--project` can be added when you want the connection only in the current project.
 
 ```sh
-npx -y agent-interop-runtime@1.0.2 cursor-setup --write
+npx -y agent-interop-runtime@1.1.0 cursor-setup --write
 ```
 
 ### Claude Code

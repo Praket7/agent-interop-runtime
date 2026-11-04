@@ -37,11 +37,34 @@ export interface AgentSession extends ThreadSummary {
   provenance: { discoveredAt: string; source: string; native: true };
 }
 
-export interface OperationReceipt { provider: ProviderId; nativeId: string; operation: string; accepted: boolean; status?: 'accepted' | 'queued' | 'completed' | 'rejected'; providerState?: string; detail?: Json; }
-export interface AgentModel { providerID: string; modelID: string; variant?: string; }
+export interface OperationReceipt {
+  provider: ProviderId;
+  nativeId: string;
+  operation: string;
+  accepted: boolean;
+  status?: 'accepted' | 'queued' | 'completed' | 'rejected';
+  providerState?: string;
+  detail?: Json;
+}
+export interface AgentModel {
+  providerID: string;
+  modelID: string;
+  variant?: string;
+}
 export type ModelSelection = string | AgentModel;
-export interface AgentSendOptions { model?: AgentModel; agent?: string; reasoning?: string; }
-export interface AgentEvent { provider: ProviderId; nativeId: string; sequence: number; timestamp: string; type: string; data: Json; }
+export interface AgentSendOptions {
+  model?: AgentModel;
+  agent?: string;
+  reasoning?: string;
+}
+export interface AgentEvent {
+  provider: ProviderId;
+  nativeId: string;
+  sequence: number;
+  timestamp: string;
+  type: string;
+  data: Json;
+}
 
 export interface AgentAdapter {
   readonly id: ProviderId;
@@ -53,7 +76,7 @@ export interface AgentAdapter {
   send?(nativeId: string, text: string, options?: AgentSendOptions): Promise<OperationReceipt>;
   steer?(nativeId: string, text: string, options?: AgentSendOptions): Promise<OperationReceipt>;
   cancel?(nativeId: string): Promise<OperationReceipt>;
-  events?(nativeId: string): AsyncIterable<AgentEvent>;
+  events?(nativeId: string, signal?: AbortSignal): AsyncIterable<AgentEvent>;
   getDiff?(nativeId: string): Promise<Json | null>;
   respondPermission?(nativeId: string, requestId: string, decision: string): Promise<OperationReceipt>;
   setModel?(nativeId: string, model: ModelSelection): Promise<OperationReceipt>;
@@ -67,16 +90,48 @@ export interface EvidenceRecord {
   nativeId: string;
   kind: 'session' | 'event' | 'diff' | 'verification';
   capturedAt: string;
-  trust: 'agent_claim' | 'provider_observed' | 'runtime_observed' | 'repository_verified' | 'external_verified' | 'human_accepted' | 'native' | 'observed' | 'verified';
+  trust:
+    | 'agent_claim'
+    | 'provider_observed'
+    | 'runtime_observed'
+    | 'repository_verified'
+    | 'external_verified'
+    | 'human_accepted'
+    | 'native'
+    | 'observed'
+    | 'verified';
   summary: string;
   data: Json;
 }
 
 export interface WorkGraphSnapshot {
   sessions: AgentSession[];
-  edges: Array<{ from: string; to: string; kind: 'handoff' | 'review' | 'parent' | 'evidence' | 'depends_on' | 'verifies' | 'supersedes' | 'blocks' | 'shares_workspace_with' | 'claims' }>;
+  edges: Array<{
+    from: string;
+    to: string;
+    kind:
+      | 'handoff'
+      | 'review'
+      | 'parent'
+      | 'evidence'
+      | 'depends_on'
+      | 'verifies'
+      | 'supersedes'
+      | 'blocks'
+      | 'shares_workspace_with'
+      | 'claims';
+  }>;
   evidence: EvidenceRecord[];
 }
 
-export type RuntimeView = Pick<ThreadDetail, 'id' | 'title' | 'state' | 'model' | 'metadata' | 'live'> & { provider: ProviderId; nativeId: string };
-export type LegacyRuntime = { capabilities(): Promise<unknown>; listProjects(): Promise<ProjectSummary[]>; listThreads(projectId?: string): Promise<ThreadSummary[]>; getThread(id: string): Promise<ThreadDetail>; getThreadProgress(id: string, after?: number, limit?: number): Promise<ThreadProgressSnapshot>; };
+export type RuntimeView = Pick<ThreadDetail, 'id' | 'title' | 'state' | 'model' | 'metadata' | 'live'> & {
+  provider: ProviderId;
+  nativeId: string;
+};
+export type LegacyRuntime = {
+  capabilities(): Promise<unknown>;
+  listProjects(): Promise<ProjectSummary[]>;
+  listThreads(projectId?: string): Promise<ThreadSummary[]>;
+  getThread(id: string): Promise<ThreadDetail>;
+  getThreadProgress(id: string, after?: number, limit?: number): Promise<ThreadProgressSnapshot>;
+};

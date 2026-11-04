@@ -9,16 +9,49 @@ export interface Capabilities {
   endpoints: string[];
   notes: string[];
 }
-export interface ProjectSummary { id: string; path: string; name?: string; metadata?: Json; }
-export interface ThreadSummary { id: string; projectId?: string; title?: string; state?: string; model?: string; metadata?: Json; }
-export interface ThreadDetail extends ThreadSummary { messages?: Json[]; activeWork?: Json; live?: ThreadProgressSnapshot; }
-export type ThreadProgressKind = 'turn_state' | 'assistant_text' | 'tool_start' | 'tool_output' | 'file_change' | 'completed' | 'failed' | 'unknown';
+export interface ProjectSummary {
+  id: string;
+  path: string;
+  name?: string;
+  metadata?: Json;
+}
+export interface ThreadSummary {
+  id: string;
+  projectId?: string;
+  title?: string;
+  state?: string;
+  model?: string;
+  metadata?: Json;
+}
+export interface ThreadDetail extends ThreadSummary {
+  messages?: Json[];
+  activeWork?: Json;
+  live?: ThreadProgressSnapshot;
+}
+export type ThreadProgressKind =
+  | 'turn_state'
+  | 'assistant_text'
+  | 'tool_start'
+  | 'tool_output'
+  | 'file_change'
+  | 'completed'
+  | 'failed'
+  | 'unknown';
 export interface ThreadProgressEvent {
   sequence: number;
   threadId: string;
   timestamp: string;
   kind: ThreadProgressKind;
-  phase?: 'planning' | 'reading_files' | 'running_tests' | 'editing_files' | 'reviewing_changes' | 'waiting_for_input' | 'completed' | 'failed' | 'unknown';
+  phase?:
+    | 'planning'
+    | 'reading_files'
+    | 'running_tests'
+    | 'editing_files'
+    | 'reviewing_changes'
+    | 'waiting_for_input'
+    | 'completed'
+    | 'failed'
+    | 'unknown';
   state?: string;
   tool?: string;
   command?: string;
@@ -27,4 +60,21 @@ export interface ThreadProgressEvent {
   error?: string;
   raw?: Json;
 }
-export interface ThreadProgressSnapshot { threadId: string; currentState?: string; events: ThreadProgressEvent[]; /** Last delivered event sequence; pass back as afterSequence for exactly-once reads (AI-04). */ next?: number; nextSequence?: number; latestSequence?: number; gap?: { from: number; to: number }; connected: boolean; stale: boolean; latestEventAt?: string; activeTool?: string; filesChanged?: string[]; phase?: ThreadProgressEvent['phase']; lastMeaningfulUpdate?: string; lastError?: string; secondsSinceLastEvent?: number; }
+export interface ThreadProgressSnapshot {
+  threadId: string;
+  currentState?: string;
+  events: ThreadProgressEvent[] /** Last delivered event sequence; pass back as afterSequence for exactly-once reads (AI-04). */;
+  next?: number;
+  nextSequence?: number;
+  latestSequence?: number;
+  gap?: { from: number; to: number };
+  connected: boolean;
+  stale: boolean;
+  latestEventAt?: string;
+  activeTool?: string;
+  filesChanged?: string[];
+  phase?: ThreadProgressEvent['phase'];
+  lastMeaningfulUpdate?: string;
+  lastError?: string;
+  secondsSinceLastEvent?: number;
+}

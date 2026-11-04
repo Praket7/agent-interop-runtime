@@ -4,6 +4,12 @@ Agent Interop Runtime is a small local service between an MCP client and coding 
 
 The MCP client asks the runtime to find a provider session or send it work. The runtime uses that provider's own local interface. The provider still owns its account, conversation, permissions, and project access.
 
+## MCP client versions
+
+The runtime serves the 2026-07-28 MCP protocol and keeps support for the earlier 2025-11-25 protocol. Stdio clients select a protocol when they open a connection. HTTP clients use the per-request protocol when they send its version envelope, while older session-based requests continue through the existing session transport.
+
+Both paths build the same tool catalog from the selected profile, so a client does not gain or lose provider actions simply because it negotiated a different MCP protocol version.
+
 The runtime stores shared work notes separately. These notes can name an owner, record a handoff, link evidence, or show a check result. They do not become part of a provider's private conversation unless the runtime sends them there.
 
 ## A message has a clear outcome

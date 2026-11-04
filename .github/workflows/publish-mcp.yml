@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing release tag to publish
         required: true
-        default: v1.0.2
+        default: v1.1.0
         type: string
 
 permissions:
@@ -72,7 +72,7 @@ jobs:
         run: npm install --global npm@^11.15.0
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Verify release metadata
         run: pnpm mcp:validate

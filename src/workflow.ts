@@ -1,13 +1,30 @@
-import fs from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Json } from './types.js';
+import fs from 'node:fs/promises';
 import type { AgentSession, WorkGraphSnapshot } from './interop.js';
-import { runVerification, type VerificationResult, type VerificationCommands } from './verification.js';
 import { atomicWriteJson, withStateLock } from './state.js';
 import { countJsonTokens, TOKENIZER_NAME } from './tokens.js';
+import type { Json } from './types.js';
+import { runVerification, type VerificationCommands, type VerificationResult } from './verification.js';
 
-export type EvidenceTrust = 'agent_claim' | 'provider_observed' | 'runtime_observed' | 'repository_verified' | 'external_verified' | 'human_accepted';
-export type EvidenceKind = 'diff' | 'file_change' | 'command' | 'test' | 'build' | 'review' | 'artifact' | 'approval' | 'lint' | 'typecheck' | 'session';
+export type EvidenceTrust =
+  | 'agent_claim'
+  | 'provider_observed'
+  | 'runtime_observed'
+  | 'repository_verified'
+  | 'external_verified'
+  | 'human_accepted';
+export type EvidenceKind =
+  | 'diff'
+  | 'file_change'
+  | 'command'
+  | 'test'
+  | 'build'
+  | 'review'
+  | 'artifact'
+  | 'approval'
+  | 'lint'
+  | 'typecheck'
+  | 'session';
 
 export interface Evidence {
   id: string;
@@ -65,8 +82,18 @@ export interface Handoff {
   risks: string[];
   unresolvedQuestions: string[];
   authorityBoundaries: string[];
-  continuationState?: 'not_started' | 'in_progress' | 'needs_completion' | 'likely_complete' | 'existing_behavior_broken';
-  latestValidation?: { label?: string; command?: string; outcome: 'passed' | 'failed' | 'unknown'; observedAt?: string };
+  continuationState?:
+    | 'not_started'
+    | 'in_progress'
+    | 'needs_completion'
+    | 'likely_complete'
+    | 'existing_behavior_broken';
+  latestValidation?: {
+    label?: string;
+    command?: string;
+    outcome: 'passed' | 'failed' | 'unknown';
+    observedAt?: string;
+  };
   assumptions?: string[];
   rollbackNotes?: string[];
   nextAction?: string;
@@ -84,13 +111,25 @@ export interface Handoff {
   createdAt: string;
 }
 
-export interface ReviewFinding { id: string; severity: 'blocking' | 'major' | 'minor' | 'note'; title: string; detail: string; file?: string; line?: number; }
+export interface ReviewFinding {
+  id: string;
+  severity: 'blocking' | 'major' | 'minor' | 'note';
+  title: string;
+  detail: string;
+  file?: string;
+  line?: number;
+}
 export interface Review {
   id: string;
   workId: string;
   subjectEvidenceIds: string[];
   reviewerSessionId: string;
-  independence: { differentSession: boolean; differentProvider: boolean; freshContext: boolean; writeAccess: boolean };
+  independence: {
+    differentSession: boolean;
+    differentProvider: boolean;
+    freshContext: boolean;
+    writeAccess: boolean;
+  };
   findings: ReviewFinding[];
   verdict: 'approve' | 'changes_requested' | 'blocked';
   /** Provenance: caller-submitted reviews are never provider observations (AI-R1). */
@@ -122,16 +161,25 @@ export interface HandoffPacket {
   tokenizer: string;
 }
 
-export type WorkSummary = Omit<WorkRecord, 'objective' | 'acceptanceCriteria' | 'risks' | 'unresolvedQuestions'> & { objectivePreview: string };
+export type WorkSummary = Omit<
+  WorkRecord,
+  'objective' | 'acceptanceCriteria' | 'risks' | 'unresolvedQuestions'
+> & { objectivePreview: string };
 export type EvidenceSummary = Omit<Evidence, 'data'> & { dataBytes: number };
 
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}_${randomUUID()}`;
 const json = (value: unknown): Json => JSON.parse(JSON.stringify(value ?? null)) as Json;
-const evidenceHash = (value: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const evidenceHash = (value: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): string =>
+  createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Structured verification entries (AI-08): no whitespace splitting, quoted args preserved. */
-export interface VerificationRequest { executable: string; args?: string[]; cwd?: string; label?: string }
+export interface VerificationRequest {
+  executable: string;
+  args?: string[];
+  cwd?: string;
+  label?: string;
+}
 export const MAX_VERIFICATION_COMMANDS = 8;
 
 export class WorkflowStore {
@@ -146,22 +194,35 @@ export class WorkflowStore {
 
   async load(): Promise<void> {
     if (this.loaded) return;
-    if (!this.file) { this.loaded = true; return; }
+    if (!this.file) {
+      this.loaded = true;
+      return;
+    }
     try {
       const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Record<string, unknown>;
       this.adopt(raw);
       this.loaded = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { this.loaded = true; return; }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.loaded = true;
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       let preservedFile: string | undefined;
-      try { preservedFile = `${this.file}.corrupt-${Date.now()}`; await fs.rename(this.file, preservedFile); } catch { /* preserve the original if the filesystem cannot rename it */ }
+      try {
+        preservedFile = `${this.file}.corrupt-${Date.now()}`;
+        await fs.rename(this.file, preservedFile);
+      } catch {
+        /* preserve the original if the filesystem cannot rename it */
+      }
       this.recovery = { required: true, file: this.file, preservedFile, reason };
       this.loaded = true;
     }
   }
 
-  recoveryStatus(): { required: true; file: string; preservedFile?: string; reason: string } | null { return this.recovery ?? null; }
+  recoveryStatus(): { required: true; file: string; preservedFile?: string; reason: string } | null {
+    return this.recovery ?? null;
+  }
 
   /** AIR-17: read paths refresh from the authoritative file so a long-lived MCP process
    * observes work/evidence/handoffs written by another process. This is intentionally kept
@@ -172,20 +233,43 @@ export class WorkflowStore {
     if (!this.file) return;
     try {
       const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Record<string, unknown>;
-      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+      this.works.clear();
+      this.evidence.clear();
+      this.handoffs.clear();
+      this.reviews.clear();
+      this.claims.clear();
       this.adopt(raw);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      this.works.clear(); this.evidence.clear(); this.handoffs.clear(); this.reviews.clear(); this.claims.clear();
+      this.works.clear();
+      this.evidence.clear();
+      this.handoffs.clear();
+      this.reviews.clear();
+      this.claims.clear();
     }
   }
 
   private adopt(raw: Record<string, unknown>): void {
-    for (const item of Array.isArray(raw.works) ? raw.works : []) { const w = item as WorkRecord; if (w?.id) this.works.set(w.id, w); }
-    for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) { const e = item as Evidence; if (e?.id) this.evidence.set(e.id, e); }
-    for (const item of Array.isArray(raw.handoffs) ? raw.handoffs : []) { const h = item as Handoff; if (h?.id) this.handoffs.set(h.id, h); }
-    for (const item of Array.isArray(raw.reviews) ? raw.reviews : []) { const r = item as Review; if (r?.id) this.reviews.set(r.id, r); }
-    for (const item of Array.isArray(raw.claims) ? raw.claims : []) { const claim = item as ResourceClaim; if (claim?.id) this.claims.set(claim.id, claim); }
+    for (const item of Array.isArray(raw.works) ? raw.works : []) {
+      const w = item as WorkRecord;
+      if (w?.id) this.works.set(w.id, w);
+    }
+    for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) {
+      const e = item as Evidence;
+      if (e?.id) this.evidence.set(e.id, e);
+    }
+    for (const item of Array.isArray(raw.handoffs) ? raw.handoffs : []) {
+      const h = item as Handoff;
+      if (h?.id) this.handoffs.set(h.id, h);
+    }
+    for (const item of Array.isArray(raw.reviews) ? raw.reviews : []) {
+      const r = item as Review;
+      if (r?.id) this.reviews.set(r.id, r);
+    }
+    for (const item of Array.isArray(raw.claims) ? raw.claims : []) {
+      const claim = item as ResourceClaim;
+      if (claim?.id) this.claims.set(claim.id, claim);
+    }
   }
 
   private async transact<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -207,62 +291,133 @@ export class WorkflowStore {
       // taking the final snapshot so the outer transaction cannot overwrite nested state
       // with a premature snapshot. Read-only refreshes perform full map replacement.
       const result = await fn();
-      const value = { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
+      const value = {
+        works: [...this.works.values()],
+        evidence: [...this.evidence.values()],
+        handoffs: [...this.handoffs.values()],
+        reviews: [...this.reviews.values()],
+        claims: [...this.claims.values()],
+      };
       await atomicWriteJson(file, value);
       return result;
     });
   }
 
-  private snapshot(): { works: WorkRecord[]; evidence: Evidence[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] } {
-    return { works: [...this.works.values()], evidence: [...this.evidence.values()], handoffs: [...this.handoffs.values()], reviews: [...this.reviews.values()], claims: [...this.claims.values()] };
+  private snapshot(): {
+    works: WorkRecord[];
+    evidence: Evidence[];
+    handoffs: Handoff[];
+    reviews: Review[];
+    claims: ResourceClaim[];
+  } {
+    return {
+      works: [...this.works.values()],
+      evidence: [...this.evidence.values()],
+      handoffs: [...this.handoffs.values()],
+      reviews: [...this.reviews.values()],
+      claims: [...this.claims.values()],
+    };
   }
 
-  async createWork(input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> & Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions' | 'dependsOn'>>): Promise<WorkRecord> {
+  async createWork(
+    input: Pick<WorkRecord, 'objective' | 'acceptanceCriteria'> &
+      Partial<Pick<WorkRecord, 'sourceSession' | 'risks' | 'unresolvedQuestions' | 'dependsOn'>>,
+  ): Promise<WorkRecord> {
     return this.transact(() => {
-      for (const dependency of input.dependsOn ?? []) if (!this.works.has(dependency)) throw new Error(`Unknown dependency work ${dependency}`);
+      for (const dependency of input.dependsOn ?? [])
+        if (!this.works.has(dependency)) throw new Error(`Unknown dependency work ${dependency}`);
       const stamp = now();
-      const work: WorkRecord = { id: id('work'), objective: input.objective, acceptanceCriteria: input.acceptanceCriteria, sourceSession: input.sourceSession, status: 'open', changedFiles: [], risks: input.risks ?? [], unresolvedQuestions: input.unresolvedQuestions ?? [], evidenceIds: [], dependsOn: input.dependsOn ?? [], createdAt: stamp, updatedAt: stamp };
+      const work: WorkRecord = {
+        id: id('work'),
+        objective: input.objective,
+        acceptanceCriteria: input.acceptanceCriteria,
+        sourceSession: input.sourceSession,
+        status: 'open',
+        changedFiles: [],
+        risks: input.risks ?? [],
+        unresolvedQuestions: input.unresolvedQuestions ?? [],
+        evidenceIds: [],
+        dependsOn: input.dependsOn ?? [],
+        createdAt: stamp,
+        updatedAt: stamp,
+      };
       this.works.set(work.id, work);
       return work;
     });
   }
 
-  async getWork(workId: string): Promise<WorkRecord | null> { await this.refreshForRead(); return this.works.get(workId) ?? null; }
+  async getWork(workId: string): Promise<WorkRecord | null> {
+    await this.refreshForRead();
+    return this.works.get(workId) ?? null;
+  }
 
   /** Metadata-only list (token efficiency): previews instead of full objectives and criteria. */
   async listWorks(): Promise<WorkSummary[]> {
     await this.refreshForRead();
-    return [...this.works.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((work) => {
-      const { objective, acceptanceCriteria, risks, unresolvedQuestions, ...rest } = work;
-      void risks; void unresolvedQuestions;
-      return { ...rest, objectivePreview: objective.slice(0, 200), acceptanceCriteriaCount: acceptanceCriteria.length } as WorkSummary & { acceptanceCriteriaCount: number };
-    });
+    return [...this.works.values()]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((work) => {
+        const { objective, acceptanceCriteria, risks, unresolvedQuestions, ...rest } = work;
+        void risks;
+        void unresolvedQuestions;
+        return {
+          ...rest,
+          objectivePreview: objective.slice(0, 200),
+          acceptanceCriteriaCount: acceptanceCriteria.length,
+        } as WorkSummary & { acceptanceCriteriaCount: number };
+      });
   }
 
   async addEvidence(input: Omit<Evidence, 'id' | 'capturedAt' | 'contentHash'>): Promise<Evidence> {
     return this.transact(() => {
       if (input.workId && !this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
       const normalized = { ...input, data: json(input.data) };
-      const evidence: Evidence = { ...normalized, id: id('evidence'), capturedAt: now(), contentHash: evidenceHash(normalized) };
+      const evidence: Evidence = {
+        ...normalized,
+        id: id('evidence'),
+        capturedAt: now(),
+        contentHash: evidenceHash(normalized),
+      };
       this.evidence.set(evidence.id, evidence);
       if (input.workId) {
         const work = this.works.get(input.workId)!;
-        if (!work.evidenceIds.includes(evidence.id)) { work.evidenceIds.push(evidence.id); work.updatedAt = evidence.capturedAt; }
+        if (!work.evidenceIds.includes(evidence.id)) {
+          work.evidenceIds.push(evidence.id);
+          work.updatedAt = evidence.capturedAt;
+        }
       }
       return evidence;
     });
   }
 
-  async getEvidence(evidenceId: string): Promise<Evidence | null> { await this.refreshForRead(); return this.evidence.get(evidenceId) ?? null; }
+  async getEvidence(evidenceId: string): Promise<Evidence | null> {
+    await this.refreshForRead();
+    return this.evidence.get(evidenceId) ?? null;
+  }
 
-  async listEvidence(workId?: string): Promise<Evidence[]> { await this.refreshForRead(); return [...this.evidence.values()].filter((e) => !workId || e.workId === workId).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)); }
+  async listEvidence(workId?: string): Promise<Evidence[]> {
+    await this.refreshForRead();
+    return [...this.evidence.values()]
+      .filter((e) => !workId || e.workId === workId)
+      .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
+  }
 
   /** Metadata-only evidence list: contents are addressable by ID, not re-returned in bulk. */
   async listEvidenceSummaries(workId?: string): Promise<EvidenceSummary[]> {
-    return (await this.listEvidence(workId)).map(({ data, ...rest }) => ({ ...rest, dataBytes: JSON.stringify(data ?? null).length }));
+    return (await this.listEvidence(workId)).map(({ data, ...rest }) => ({
+      ...rest,
+      dataBytes: JSON.stringify(data ?? null).length,
+    }));
   }
 
-  async claimResource(input: { workId: string; sessionId: string; resource: string; kind?: ResourceClaim['kind']; mode?: ResourceClaim['mode']; ttlSeconds?: number }): Promise<ResourceClaim> {
+  async claimResource(input: {
+    workId: string;
+    sessionId: string;
+    resource: string;
+    kind?: ResourceClaim['kind'];
+    mode?: ResourceClaim['mode'];
+    ttlSeconds?: number;
+  }): Promise<ResourceClaim> {
     return this.transact(() => {
       if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
       const resource = normalizeResource(input.resource);
@@ -270,19 +425,42 @@ export class WorkflowStore {
       const kind = input.kind ?? 'file';
       const mode = input.mode ?? 'exclusive';
       const nowMs = Date.now();
-      for (const claim of this.claims.values()) if (claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs) claim.status = 'expired';
-      const existing = [...this.claims.values()].find((claim) => claim.status === 'active' && claim.workId === input.workId && claim.sessionId === input.sessionId && claim.kind === kind && claim.mode === mode && claim.resource === resource);
-      if (existing) return existing;
-      const conflict = [...this.claims.values()].find((claim) =>
-        claim.status === 'active'
-        && claim.sessionId !== input.sessionId
-        && (mode === 'exclusive' || claim.mode === 'exclusive')
-        && resourcesOverlap({ resource, kind }, claim)
+      for (const claim of this.claims.values())
+        if (claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs) claim.status = 'expired';
+      const existing = [...this.claims.values()].find(
+        (claim) =>
+          claim.status === 'active' &&
+          claim.workId === input.workId &&
+          claim.sessionId === input.sessionId &&
+          claim.kind === kind &&
+          claim.mode === mode &&
+          claim.resource === resource,
       );
-      if (conflict) throw new Error(`Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`);
+      if (existing) return existing;
+      const conflict = [...this.claims.values()].find(
+        (claim) =>
+          claim.status === 'active' &&
+          claim.sessionId !== input.sessionId &&
+          (mode === 'exclusive' || claim.mode === 'exclusive') &&
+          resourcesOverlap({ resource, kind }, claim),
+      );
+      if (conflict)
+        throw new Error(
+          `Resource '${resource}' conflicts with active claim ${conflict.id} owned by ${conflict.sessionId} for work ${conflict.workId}`,
+        );
       const ttlSeconds = Math.min(3600, Math.max(30, Math.floor(input.ttlSeconds ?? 600)));
       const acquiredAt = now();
-      const claim: ResourceClaim = { id: id('claim'), workId: input.workId, sessionId: input.sessionId, resource, kind, mode, status: 'active', acquiredAt, expiresAt: new Date(nowMs + ttlSeconds * 1000).toISOString() };
+      const claim: ResourceClaim = {
+        id: id('claim'),
+        workId: input.workId,
+        sessionId: input.sessionId,
+        resource,
+        kind,
+        mode,
+        status: 'active',
+        acquiredAt,
+        expiresAt: new Date(nowMs + ttlSeconds * 1000).toISOString(),
+      };
       this.claims.set(claim.id, claim);
       return claim;
     });
@@ -292,8 +470,12 @@ export class WorkflowStore {
     return this.transact(() => {
       const claim = this.claims.get(claimId);
       if (!claim) throw new Error(`Unknown claim ${claimId}`);
-      if (sessionId && claim.sessionId !== sessionId) throw new Error(`Claim ${claimId} belongs to ${claim.sessionId}, not ${sessionId}`);
-      if (claim.status === 'active') { claim.status = 'released'; claim.releasedAt = now(); }
+      if (sessionId && claim.sessionId !== sessionId)
+        throw new Error(`Claim ${claimId} belongs to ${claim.sessionId}, not ${sessionId}`);
+      if (claim.status === 'active') {
+        claim.status = 'released';
+        claim.releasedAt = now();
+      }
       return claim;
     });
   }
@@ -301,13 +483,23 @@ export class WorkflowStore {
   async listClaims(workId?: string, activeOnly = false): Promise<ResourceClaim[]> {
     await this.refreshForRead();
     const nowMs = Date.now();
-    return [...this.claims.values()].map((claim) => claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs ? { ...claim, status: 'expired' as const } : claim).filter((claim) => (!workId || claim.workId === workId) && (!activeOnly || claim.status === 'active'));
+    return [...this.claims.values()]
+      .map((claim) =>
+        claim.status === 'active' && Date.parse(claim.expiresAt) <= nowMs
+          ? { ...claim, status: 'expired' as const }
+          : claim,
+      )
+      .filter((claim) => (!workId || claim.workId === workId) && (!activeOnly || claim.status === 'active'));
   }
 
-  async createHandoff(input: Omit<Handoff, 'id' | 'createdAt' | 'status' | 'contextTokens' | 'tokenBudget' | 'omittedFields'>): Promise<Handoff> {
+  async createHandoff(
+    input: Omit<Handoff, 'id' | 'createdAt' | 'status' | 'contextTokens' | 'tokenBudget' | 'omittedFields'>,
+  ): Promise<Handoff> {
     return this.transact(async () => {
       if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
-      for (const evidenceId of input.evidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for handoff ${input.workId}`);
+      for (const evidenceId of input.evidenceIds)
+        if (!this.evidence.has(evidenceId))
+          throw new Error(`Unknown evidence ${evidenceId} for handoff ${input.workId}`);
       const budget = parseTokenBudget();
       // AIR-05: the budget applies to the COMPLETE serialized delivery packet (routing
       // metadata, field names, omission explanations, and accounting included), measured
@@ -330,7 +522,9 @@ export class WorkflowStore {
         ...(input.assumptions?.length ? [{ name: 'assumptions', value: input.assumptions }] : []),
         ...(input.rollbackNotes?.length ? [{ name: 'rollbackNotes', value: input.rollbackNotes }] : []),
         ...(input.nextAction ? [{ name: 'nextAction', value: input.nextAction }] : []),
-        ...(input.repositoryRevision ? [{ name: 'repositoryRevision', value: input.repositoryRevision }] : []),
+        ...(input.repositoryRevision
+          ? [{ name: 'repositoryRevision', value: input.repositoryRevision }]
+          : []),
       ];
       // Collision-resistant ID with a FIXED length (randomUUID is always 36 chars): no two
       // handoffs — even in the same millisecond — share an ID, and the serialized packet
@@ -338,24 +532,41 @@ export class WorkflowStore {
       // identical inputs without weakening identity uniqueness. Generated BEFORE measuring
       // so every accounting step uses the actual final ID, never a placeholder.
       const handoffId = `handoff_${randomUUID()}`;
-      const buildPacket = (included: Array<{ name: string; value: unknown }>, omissions: Array<{ field: string; reason: string }>): HandoffPacket => ({
-        handoffId, workId: input.workId, sourceSession: input.sourceSession, ...(input.destinationSession ? { destinationSession: input.destinationSession } : {}),
+      const buildPacket = (
+        included: Array<{ name: string; value: unknown }>,
+        omissions: Array<{ field: string; reason: string }>,
+      ): HandoffPacket => ({
+        handoffId,
+        workId: input.workId,
+        sourceSession: input.sourceSession,
+        ...(input.destinationSession ? { destinationSession: input.destinationSession } : {}),
         ...mandatory,
         ...Object.fromEntries(included.map((f) => [f.name, f.value])),
         omissions,
-        contextTokens: 0, tokenBudget: budget, tokenizer: TOKENIZER_NAME,
+        contextTokens: 0,
+        tokenBudget: budget,
+        tokenizer: TOKENIZER_NAME,
       });
-      const measure = (included: Array<{ name: string; value: unknown }>, omissions: Array<{ field: string; reason: string }>) => countJsonTokens(buildPacket(included, omissions));
+      const measure = (
+        included: Array<{ name: string; value: unknown }>,
+        omissions: Array<{ field: string; reason: string }>,
+      ) => countJsonTokens(buildPacket(included, omissions));
       const requiredTokens = measure([], []);
       if (requiredTokens > budget) {
         throw new Error(
           `Handoff exceeds its ${budget}-token delivery budget even with every optional field omitted ` +
-          `(mandatory routing, objective, acceptance criteria, and authority boundaries measure ${requiredTokens} tokens). ` +
-          'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the objective/criteria/boundaries; the handoff was NOT created.',
+            `(mandatory routing, objective, acceptance criteria, and authority boundaries measure ${requiredTokens} tokens). ` +
+            'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the objective/criteria/boundaries; the handoff was NOT created.',
         );
       }
-      const omission = (field: string) => ({ field, reason: `exceeds ${budget}-token handoff delivery budget; request field explicitly from work ${input.workId}` });
-      const finalize = (included: Array<{ name: string; value: unknown }>, omissions: Array<{ field: string; reason: string }>): { packet: HandoffPacket; tokens: number } => {
+      const omission = (field: string) => ({
+        field,
+        reason: `exceeds ${budget}-token handoff delivery budget; request field explicitly from work ${input.workId}`,
+      });
+      const finalize = (
+        included: Array<{ name: string; value: unknown }>,
+        omissions: Array<{ field: string; reason: string }>,
+      ): { packet: HandoffPacket; tokens: number } => {
         const packet = buildPacket(included, omissions);
         // Converge the self-referential contextTokens field: measure with 0, set, re-measure.
         let tokens = countJsonTokens(packet);
@@ -374,13 +585,16 @@ export class WorkflowStore {
       const included: Array<{ name: string; value: unknown }> = [];
       const omissions: Array<{ field: string; reason: string }> = [];
       for (const field of optional) {
-        if (finalize([...included, field], omissions).tokens <= budget) { included.push(field); continue; }
+        if (finalize([...included, field], omissions).tokens <= budget) {
+          included.push(field);
+          continue;
+        }
         const withNote = [...omissions, omission(field.name)];
         if (finalize(included, withNote).tokens > budget) {
           throw new Error(
             `Handoff exceeds its ${budget}-token delivery budget: even the omission note for '${field.name}' does not fit ` +
-            'alongside mandatory routing, objective, acceptance criteria, authority boundaries, and accounting. ' +
-            'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the content; the handoff was NOT created.',
+              'alongside mandatory routing, objective, acceptance criteria, authority boundaries, and accounting. ' +
+              'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the content; the handoff was NOT created.',
           );
         }
         omissions.push(omission(field.name));
@@ -389,15 +603,27 @@ export class WorkflowStore {
       if (finalTokens > budget) {
         throw new Error(
           `Handoff exceeds its ${budget}-token delivery budget (final packet measures ${finalTokens} tokens ` +
-          'including mandatory routing, objective, acceptance criteria, authority boundaries, omission notes, and accounting). ' +
-          'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the content; the handoff was NOT created.',
+            'including mandatory routing, objective, acceptance criteria, authority boundaries, omission notes, and accounting). ' +
+            'Raise INTEROP_HANDOFF_TOKEN_BUDGET or shorten the content; the handoff was NOT created.',
         );
       }
       const contextTokens = packet.contextTokens;
-      const handoff: Handoff = { ...input, id: handoffId, status: 'created', contextTokens, tokenBudget: budget, omittedFields: omissions.map((o) => o.field), createdAt: now() };
+      const handoff: Handoff = {
+        ...input,
+        id: handoffId,
+        status: 'created',
+        contextTokens,
+        tokenBudget: budget,
+        omittedFields: omissions.map((o) => o.field),
+        createdAt: now(),
+      };
       this.handoffs.set(handoff.id, handoff);
       const work = this.works.get(input.workId);
-      if (work) { work.destinationSession = input.destinationSession; work.status = 'in_progress'; work.updatedAt = handoff.createdAt; }
+      if (work) {
+        work.destinationSession = input.destinationSession;
+        work.status = 'in_progress';
+        work.updatedAt = handoff.createdAt;
+      }
       return handoff;
     });
   }
@@ -427,22 +653,46 @@ export class WorkflowStore {
       nextAction: handoff.nextAction,
       repositoryRevision: handoff.repositoryRevision,
     };
-    const packet: HandoffPacket = { handoffId: handoff.id, workId: handoff.workId, sourceSession: handoff.sourceSession, ...(handoff.destinationSession ? { destinationSession: handoff.destinationSession } : {}), omissions: [], contextTokens: handoff.contextTokens, tokenBudget: handoff.tokenBudget, tokenizer: TOKENIZER_NAME };
-    for (const name of handoff.omittedFields) packet.omissions.push({ field: name, reason: `exceeds ${handoff.tokenBudget}-token handoff budget; request field explicitly from work ${handoff.workId}` });
-    for (const [name, value] of Object.entries(full)) if (!handoff.omittedFields.includes(name)) (packet as unknown as Record<string, unknown>)[name] = value;
+    const packet: HandoffPacket = {
+      handoffId: handoff.id,
+      workId: handoff.workId,
+      sourceSession: handoff.sourceSession,
+      ...(handoff.destinationSession ? { destinationSession: handoff.destinationSession } : {}),
+      omissions: [],
+      contextTokens: handoff.contextTokens,
+      tokenBudget: handoff.tokenBudget,
+      tokenizer: TOKENIZER_NAME,
+    };
+    for (const name of handoff.omittedFields)
+      packet.omissions.push({
+        field: name,
+        reason: `exceeds ${handoff.tokenBudget}-token handoff budget; request field explicitly from work ${handoff.workId}`,
+      });
+    for (const [name, value] of Object.entries(full))
+      if (!handoff.omittedFields.includes(name)) (packet as unknown as Record<string, unknown>)[name] = value;
     return packet;
   }
 
-  async listHandoffs(workId?: string): Promise<Handoff[]> { await this.refreshForRead(); return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId); }
+  async listHandoffs(workId?: string): Promise<Handoff[]> {
+    await this.refreshForRead();
+    return [...this.handoffs.values()].filter((h) => !workId || h.workId === workId);
+  }
 
   async updateHandoffStatus(handoffId: string, status: Handoff['status']): Promise<Handoff> {
     return this.transact(() => {
       const handoff = this.handoffs.get(handoffId);
       if (!handoff) throw new Error(`Unknown handoff ${handoffId}`);
       const allowed: Record<Handoff['status'], Handoff['status'][]> = {
-        created: ['accepted','blocked','superseded'], accepted: ['applied','blocked','superseded'], applied: ['verified','blocked','superseded'], verified: ['completed','blocked','superseded'], completed: [], blocked: ['accepted','superseded'], superseded: [],
+        created: ['accepted', 'blocked', 'superseded'],
+        accepted: ['applied', 'blocked', 'superseded'],
+        applied: ['verified', 'blocked', 'superseded'],
+        verified: ['completed', 'blocked', 'superseded'],
+        completed: [],
+        blocked: ['accepted', 'superseded'],
+        superseded: [],
       };
-      if (handoff.status !== status && !allowed[handoff.status].includes(status)) throw new Error(`Invalid handoff transition ${handoff.status} -> ${status}`);
+      if (handoff.status !== status && !allowed[handoff.status].includes(status))
+        throw new Error(`Invalid handoff transition ${handoff.status} -> ${status}`);
       handoff.status = status;
       return handoff;
     });
@@ -452,73 +702,154 @@ export class WorkflowStore {
    * AI-R1: caller-submitted reviews are recorded as agent_claim, never provider_observed.
    * Only reviews observed through verified provider events may carry provider_observed trust.
    */
-  async createReview(input: Omit<Review, 'id' | 'createdAt' | 'provenance'> & { provenance?: 'agent_claim' | 'provider_observed' }): Promise<Review> {
+  async createReview(
+    input: Omit<Review, 'id' | 'createdAt' | 'provenance'> & {
+      provenance?: 'agent_claim' | 'provider_observed';
+    },
+  ): Promise<Review> {
     const provenance = input.provenance ?? 'agent_claim';
     return this.transact(async () => {
       if (!this.works.has(input.workId)) throw new Error(`Unknown work ${input.workId}`);
-      for (const evidenceId of input.subjectEvidenceIds) if (!this.evidence.has(evidenceId)) throw new Error(`Unknown evidence ${evidenceId} for review ${input.workId}`);
+      for (const evidenceId of input.subjectEvidenceIds)
+        if (!this.evidence.has(evidenceId))
+          throw new Error(`Unknown evidence ${evidenceId} for review ${input.workId}`);
       const review: Review = { ...input, provenance, id: id('review'), createdAt: now() };
       this.reviews.set(review.id, review);
       await this.addEvidence({
-        workId: input.workId, sessionId: input.reviewerSessionId, kind: 'review',
+        workId: input.workId,
+        sessionId: input.reviewerSessionId,
+        kind: 'review',
         trust: provenance === 'provider_observed' ? 'provider_observed' : 'agent_claim',
-        source: { adapter: input.reviewerSessionId.split(':')[0] ?? 'unknown', ...(provenance === 'provider_observed' ? {} : { protocol: 'caller submission' }) },
-        summary: provenance === 'provider_observed' ? `Provider-observed review verdict ${input.verdict}` : `Caller-submitted review verdict ${input.verdict} (unverified provenance)`,
+        source: {
+          adapter: input.reviewerSessionId.split(':')[0] ?? 'unknown',
+          ...(provenance === 'provider_observed' ? {} : { protocol: 'caller submission' }),
+        },
+        summary:
+          provenance === 'provider_observed'
+            ? `Provider-observed review verdict ${input.verdict}`
+            : `Caller-submitted review verdict ${input.verdict} (unverified provenance)`,
         data: review as unknown as Json,
       });
       return review;
     });
   }
 
-  async listReviews(workId?: string): Promise<Review[]> { await this.refreshForRead(); return [...this.reviews.values()].filter((r) => !workId || r.workId === workId); }
+  async listReviews(workId?: string): Promise<Review[]> {
+    await this.refreshForRead();
+    return [...this.reviews.values()].filter((r) => !workId || r.workId === workId);
+  }
 
   /**
    * AI-08: every accepted command runs; input beyond the documented limit is rejected before
    * anything executes. Structured {executable,args,cwd} entries keep quoted arguments intact.
    * Verification-pass status is distinct from human acceptance of the objective.
    */
-  async verify(workId: string, cwd: string, requests: Array<string | VerificationRequest>): Promise<VerificationResult[]> {
-    if (requests.length > MAX_VERIFICATION_COMMANDS) throw new Error(`Verification accepts at most ${MAX_VERIFICATION_COMMANDS} commands; received ${requests.length}. Submit the remainder separately.`);
+  async verify(
+    workId: string,
+    cwd: string,
+    requests: Array<string | VerificationRequest>,
+    signal?: AbortSignal,
+  ): Promise<VerificationResult[]> {
+    if (requests.length > MAX_VERIFICATION_COMMANDS)
+      throw new Error(
+        `Verification accepts at most ${MAX_VERIFICATION_COMMANDS} commands; received ${requests.length}. Submit the remainder separately.`,
+      );
     if (!requests.length) throw new Error('Verification requires at least one command');
     const work = await this.getWork(workId);
     if (!work) throw new Error(`Unknown work ${workId}`);
     const names = ['test', 'lint', 'typecheck', 'build', 'extra1', 'extra2', 'extra3', 'extra4'] as const;
-    const configured: VerificationCommands = Object.fromEntries(requests.map((request, index) => {
-      const structured = typeof request === 'string' ? parseLegacyRequest(request) : request;
-      const executable = structured.executable?.trim();
-      if (!executable) throw new Error('Verification commands must not be empty');
-      const name = index < 4 ? names[index]! : `check${index - 3}` as (typeof names)[number];
-      return [name, { executable, args: structured.args ?? [], cwd: structured.cwd ?? cwd, ...(structured.label ? { label: structured.label } : {}) }];
-    }));
-    const result = await runVerification({ cwd, commands: configured });
+    const configured: VerificationCommands = Object.fromEntries(
+      requests.map((request, index) => {
+        const structured = typeof request === 'string' ? parseLegacyRequest(request) : request;
+        const executable = structured.executable?.trim();
+        if (!executable) throw new Error('Verification commands must not be empty');
+        const name = index < 4 ? names[index]! : (`check${index - 3}` as (typeof names)[number]);
+        return [
+          name,
+          {
+            executable,
+            args: structured.args ?? [],
+            cwd: structured.cwd ?? cwd,
+            ...(structured.label ? { label: structured.label } : {}),
+          },
+        ];
+      }),
+    );
+    const result = await runVerification({ cwd, commands: configured, signal });
     for (const command of result.commands) {
-      const kind: EvidenceKind = command.name === 'test' ? 'test' : command.name === 'build' ? 'build' : command.name === 'lint' ? 'lint' : 'typecheck';
-      await this.addEvidence({ workId, kind, trust: 'runtime_observed', source: { adapter: 'agent-interop-runtime', protocol: 'local process' }, summary: `${command.command} exited ${command.exitCode ?? 'unknown'}`, data: command as unknown as Json });
+      const kind: EvidenceKind =
+        command.name === 'test'
+          ? 'test'
+          : command.name === 'build'
+            ? 'build'
+            : command.name === 'lint'
+              ? 'lint'
+              : 'typecheck';
+      await this.addEvidence({
+        workId,
+        kind,
+        trust: 'runtime_observed',
+        source: { adapter: 'agent-interop-runtime', protocol: 'local process' },
+        summary: `${command.command} exited ${command.exitCode ?? 'unknown'}`,
+        data: command as unknown as Json,
+      });
     }
-    const passed = result.commands.length > 0 && result.commands.every((command) => command.exitCode === 0);
+    const passed =
+      !result.cancelled &&
+      result.commands.length > 0 &&
+      result.commands.every((command) => command.exitCode === 0);
     return this.transact(() => {
       const record = this.works.get(workId);
       // Verification success blocks only the 'blocked' state; it never marks human acceptance.
-      if (record) { record.status = passed ? (record.status === 'accepted' ? 'accepted' : 'in_progress') : 'blocked'; record.updatedAt = now(); }
+      if (record) {
+        record.status = passed ? (record.status === 'accepted' ? 'accepted' : 'in_progress') : 'blocked';
+        record.updatedAt = now();
+      }
       return [result];
     });
   }
 
-  async graph(sessions: AgentSession[] = []): Promise<WorkGraphSnapshot & { works: WorkRecord[]; handoffs: Handoff[]; reviews: Review[]; claims: ResourceClaim[] }> {
+  async graph(sessions: AgentSession[] = []): Promise<
+    WorkGraphSnapshot & {
+      works: WorkRecord[];
+      handoffs: Handoff[];
+      reviews: Review[];
+      claims: ResourceClaim[];
+    }
+  > {
     await this.refreshForRead();
     const snap = this.snapshot();
-    const edges: WorkGraphSnapshot['edges'] = snap.evidence.filter((e) => e.workId).map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
-    for (const handoff of snap.handoffs) { if (handoff.destinationSession) edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' }); }
-    for (const review of snap.reviews) edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
-    for (const work of snap.works) for (const dependency of work.dependsOn ?? []) edges.push({ from: work.id, to: dependency, kind: 'depends_on' });
-    for (const claim of snap.claims.filter((value) => value.status === 'active')) edges.push({ from: claim.sessionId, to: claim.workId, kind: 'claims' });
-    return { sessions, edges, evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'], works: snap.works, handoffs: snap.handoffs, reviews: snap.reviews, claims: snap.claims };
+    const edges: WorkGraphSnapshot['edges'] = snap.evidence
+      .filter((e) => e.workId)
+      .map((e) => ({ from: e.workId!, to: e.id, kind: 'evidence' as const }));
+    for (const handoff of snap.handoffs) {
+      if (handoff.destinationSession)
+        edges.push({ from: handoff.sourceSession, to: handoff.destinationSession, kind: 'handoff' });
+    }
+    for (const review of snap.reviews)
+      edges.push({ from: review.reviewerSessionId, to: review.workId, kind: 'review' });
+    for (const work of snap.works)
+      for (const dependency of work.dependsOn ?? [])
+        edges.push({ from: work.id, to: dependency, kind: 'depends_on' });
+    for (const claim of snap.claims.filter((value) => value.status === 'active'))
+      edges.push({ from: claim.sessionId, to: claim.workId, kind: 'claims' });
+    return {
+      sessions,
+      edges,
+      evidence: snap.evidence as unknown as WorkGraphSnapshot['evidence'],
+      works: snap.works,
+      handoffs: snap.handoffs,
+      reviews: snap.reviews,
+      claims: snap.claims,
+    };
   }
 }
 
 /** Legacy string form: quote-aware tokens; shell metacharacters are rejected. */
 function parseLegacyRequest(command: string): Omit<VerificationRequest, 'name'> {
-  const tokens = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((token) => token.replace(/^(['"])(.*)\1$/, '$2')) ?? [];
+  const tokens =
+    command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((token) => token.replace(/^(['"])(.*)\1$/, '$2')) ??
+    [];
   const executable = tokens.shift();
   if (!executable || /[;&|<>`$]/.test(command)) throw new Error(`Unsafe verification command: ${command}`);
   return { executable, args: tokens };
@@ -532,13 +863,23 @@ function parseTokenBudget(): number {
   return 2_000;
 }
 
-function normalizeResource(value: string): string { return value.trim().replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, ''); }
-function resourcesOverlap(a: { resource: string; kind: ResourceClaim['kind'] }, b: { resource: string; kind: ResourceClaim['kind'] }): boolean {
-  const ar = normalizeResource(a.resource); const br = normalizeResource(b.resource);
+function normalizeResource(value: string): string {
+  return value.trim().replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+}
+function resourcesOverlap(
+  a: { resource: string; kind: ResourceClaim['kind'] },
+  b: { resource: string; kind: ResourceClaim['kind'] },
+): boolean {
+  const ar = normalizeResource(a.resource);
+  const br = normalizeResource(b.resource);
   if (a.kind === 'workspace' || b.kind === 'workspace') return ar === br;
   if (a.kind === 'interface' || b.kind === 'interface') return a.kind === b.kind && ar === br;
   if (a.kind === 'file' && b.kind === 'file') return ar === br;
   const aPrefix = a.kind === 'directory' ? `${ar}/` : ar;
   const bPrefix = b.kind === 'directory' ? `${br}/` : br;
-  return ar === br || (a.kind === 'directory' && br.startsWith(aPrefix)) || (b.kind === 'directory' && ar.startsWith(bPrefix));
+  return (
+    ar === br ||
+    (a.kind === 'directory' && br.startsWith(aPrefix)) ||
+    (b.kind === 'directory' && ar.startsWith(bPrefix))
+  );
 }

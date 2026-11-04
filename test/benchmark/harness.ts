@@ -27,9 +27,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ConversationStore } from '../../src/conversations.js';
-import { WorkflowStore } from '../../src/workflow.js';
 import { InteropRegistry } from '../../src/interop-runtime.js';
-import { InMemoryProvider, DuplicateReadCounter, countBytes, countPayloadTokens } from './shared.js';
+import { WorkflowStore } from '../../src/workflow.js';
+import { countBytes, countPayloadTokens, DuplicateReadCounter, InMemoryProvider } from './shared.js';
 
 export interface TaskResult {
   task: string;
@@ -47,7 +47,11 @@ const CRITERIA_REVIEW = ['reviewer confirms the fix matches the objective', 'no 
 
 async function tempState(): Promise<{ dir: string; conversations: string; workflow: string }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'interop-bench-'));
-  return { dir, conversations: path.join(dir, 'conversations.json'), workflow: path.join(dir, 'workflow.json') };
+  return {
+    dir,
+    conversations: path.join(dir, 'conversations.json'),
+    workflow: path.join(dir, 'workflow.json'),
+  };
 }
 
 /**
@@ -86,23 +90,44 @@ export async function runTask(
       unresolvedQuestions: ['should the helper be exported from the index?'],
     });
     const evidence = await workflow.addEvidence({
-      workId: work.id, sessionId: sender.id, kind: 'diff', trust: 'runtime_observed',
-      source: { adapter: steps.senderProvider.id }, summary: 'Native diff snapshot for handoff',
+      workId: work.id,
+      sessionId: sender.id,
+      kind: 'diff',
+      trust: 'runtime_observed',
+      source: { adapter: steps.senderProvider.id },
+      summary: 'Native diff snapshot for handoff',
       data: await registry.diff(steps.senderProvider.id, sender.nativeId),
     });
     const handoff = await workflow.createHandoff({
-      workId: work.id, sourceSession: sender.id, destinationSession: recipient.id,
-      objective: steps.objective, acceptanceCriteria: steps.criteria, evidenceIds: [evidence.id],
-      changedFiles: ['src/utils.ts'], risks: [], unresolvedQuestions: [], authorityBoundaries: ['recipient implements; reviewer reports only'],
+      workId: work.id,
+      sourceSession: sender.id,
+      destinationSession: recipient.id,
+      objective: steps.objective,
+      acceptanceCriteria: steps.criteria,
+      evidenceIds: [evidence.id],
+      changedFiles: ['src/utils.ts'],
+      risks: [],
+      unresolvedQuestions: [],
+      authorityBoundaries: ['recipient implements; reviewer reports only'],
     });
     metered.push(work, evidence, handoff);
 
     // Directed delivery through the real persist-before-send path.
     const conversation = await conversations.create(`bench: ${name}`);
-    await conversations.join(conversation.id, { provider: steps.senderProvider.id, nativeId: sender.nativeId, id: sender.id });
-    await conversations.join(conversation.id, { provider: steps.recipientProvider.id, nativeId: recipient.nativeId, id: recipient.id });
+    await conversations.join(conversation.id, {
+      provider: steps.senderProvider.id,
+      nativeId: sender.nativeId,
+      id: sender.id,
+    });
+    await conversations.join(conversation.id, {
+      provider: steps.recipientProvider.id,
+      nativeId: recipient.nativeId,
+      id: recipient.id,
+    });
     const { message, receipt } = await conversations.send(
-      conversation.id, sender.id, recipient.id,
+      conversation.id,
+      sender.id,
+      recipient.id,
       `Handoff ${handoff.id}: ${steps.objective}. Criteria: ${JSON.stringify(steps.criteria)}. Evidence: ${evidence.id}. Authority: implement within src/utils.ts only.`,
       registry,
     );
@@ -110,7 +135,8 @@ export async function runTask(
 
     // Correlate the lifecycle through bounded observation (blocked phases if requested).
     if (steps.blockers) {
-      for (let i = 0; i < steps.blockers; i += 1) await steps.recipientProvider.runTurn(recipient.nativeId, ['blocked']);
+      for (let i = 0; i < steps.blockers; i += 1)
+        await steps.recipientProvider.runTurn(recipient.nativeId, ['blocked']);
     }
     await steps.recipientProvider.runTurn(recipient.nativeId, ['completed']);
 
@@ -127,7 +153,10 @@ export async function runTask(
         const events = await registry.readEvents(provider.id, recipient.nativeId, 2, 50, cursor);
         for (const event of events) observer.record({ key: `event:${event.sequence}`, body: event });
         metered.push(events);
-        if (events.length === 0) { if (cursor >= total) break; else continue; }
+        if (events.length === 0) {
+          if (cursor >= total) break;
+          else continue;
+        }
         cursor = Math.max(...events.map((e) => e.sequence));
         if (cursor >= total) break;
       }
@@ -138,7 +167,8 @@ export async function runTask(
     let transcriptCursor = 0;
     for (let page = 0; page < 2; page += 1) {
       const conversationPage = await conversations.read(conversation.id, transcriptCursor, 100);
-      for (const m of conversationPage.messages) transcriptObserver.record({ key: `message:${m.id}`, body: m });
+      for (const m of conversationPage.messages)
+        transcriptObserver.record({ key: `message:${m.id}`, body: m });
       metered.push(conversationPage.messages.map((m) => ({ ...m, text: `${m.text.slice(0, 40)}…` })));
       if (conversationPage.next <= transcriptCursor) break;
       transcriptCursor = conversationPage.next;
@@ -159,7 +189,9 @@ export async function runTask(
       tokens: metered.reduce((sum, payload) => sum + countPayloadTokens(payload), 0),
       duplicateReads,
       providerObservedSends: steps.recipientProvider.received.length,
-      duplicateProviderSends: steps.recipientProvider.received.filter((r, i, all) => all.findIndex((o) => o.text === r.text && o.nativeId === r.nativeId) !== i).length,
+      duplicateProviderSends: steps.recipientProvider.received.filter(
+        (r, i, all) => all.findIndex((o) => o.text === r.text && o.nativeId === r.nativeId) !== i,
+      ).length,
       finalState,
     };
   } finally {
@@ -179,36 +211,66 @@ export async function runBenchmark(): Promise<{
     await runTask('implement-utils', {
       objective: 'Implement a date-parsing utility in src/utils.ts with tests',
       criteria: CRITERIA_IMPLEMENT,
-      senderProvider: new InMemoryProvider('codex', 'Benchmark Sender', [{ nativeId: 'sender-1', cwd: '/tmp/bench-sender' }]),
-      recipientProvider: new InMemoryProvider('claude-code', 'Benchmark Recipient', [{ nativeId: 'worker-1', cwd: '/tmp/bench-recipient' }]),
+      senderProvider: new InMemoryProvider('codex', 'Benchmark Sender', [
+        { nativeId: 'sender-1', cwd: '/tmp/bench-sender' },
+      ]),
+      recipientProvider: new InMemoryProvider('claude-code', 'Benchmark Recipient', [
+        { nativeId: 'worker-1', cwd: '/tmp/bench-recipient' },
+      ]),
     }),
     await runTask('review-hotfix', {
       objective: 'Review the auth hotfix against the original objective',
       criteria: CRITERIA_REVIEW,
-      senderProvider: new InMemoryProvider('opencode', 'Benchmark Subject', [{ nativeId: 'subject-1', cwd: '/tmp/bench-subject' }]),
-      recipientProvider: new InMemoryProvider('cursor', 'Benchmark Reviewer', [{ nativeId: 'reviewer-1', cwd: '/tmp/bench-reviewer' }]),
+      senderProvider: new InMemoryProvider('opencode', 'Benchmark Subject', [
+        { nativeId: 'subject-1', cwd: '/tmp/bench-subject' },
+      ]),
+      recipientProvider: new InMemoryProvider('cursor', 'Benchmark Reviewer', [
+        { nativeId: 'reviewer-1', cwd: '/tmp/bench-reviewer' },
+      ]),
     }),
     await runTask('blocked-then-resume', {
       objective: 'Apply the migration script after approval',
       criteria: ['migration runs cleanly', 'rollback documented'],
-      senderProvider: new InMemoryProvider('codex', 'Benchmark Sender', [{ nativeId: 'sender-2', cwd: '/tmp/bench-sender' }]),
-      recipientProvider: new InMemoryProvider('claude-code', 'Benchmark Worker', [{ nativeId: 'worker-2', cwd: '/tmp/bench-worker' }]),
+      senderProvider: new InMemoryProvider('codex', 'Benchmark Sender', [
+        { nativeId: 'sender-2', cwd: '/tmp/bench-sender' },
+      ]),
+      recipientProvider: new InMemoryProvider('claude-code', 'Benchmark Worker', [
+        { nativeId: 'worker-2', cwd: '/tmp/bench-worker' },
+      ]),
       blockers: 2,
     }),
   ];
   // Catalog measurement uses the real MCP server object with a stub runtime.
   const stubRuntime = { capabilities: async () => ({}) } as never;
-  const fullServer = createServer(stubRuntime, true, 'full') as unknown as { _registeredTools: Record<string, { title?: string; description?: string }> };
-  const coreServer = createServer(stubRuntime, true, 'core') as unknown as { _registeredTools: Record<string, { title?: string; description?: string }> };
-  const measure = (server: typeof fullServer) => {
-    const entries = Object.entries(server._registeredTools).map(([name, tool]) => ({ name, description: tool.description }));
-    return { profile: '', tools: entries.length, bytes: countBytes(entries), tokens: countPayloadTokens(entries) };
+  const fullServer = createServer(stubRuntime, true, 'full') as unknown as {
+    _registeredTools: Record<string, { title?: string; description?: string }>;
   };
-  const full = measure(fullServer); const core = measure(coreServer);
+  const coreServer = createServer(stubRuntime, true, 'core') as unknown as {
+    _registeredTools: Record<string, { title?: string; description?: string }>;
+  };
+  const measure = (server: typeof fullServer) => {
+    const entries = Object.entries(server._registeredTools).map(([name, tool]) => ({
+      name,
+      description: tool.description,
+    }));
+    return {
+      profile: '',
+      tools: entries.length,
+      bytes: countBytes(entries),
+      tokens: countPayloadTokens(entries),
+    };
+  };
+  const full = measure(fullServer);
+  const core = measure(coreServer);
   return {
     tokenizer: 'js-tiktoken o200k_base (offline estimate, not native provider usage)',
     tasks,
-    catalog: { profile: 'full vs core', tools: full.tools - core.tools, bytes: full.bytes - core.bytes, tokens: full.tokens - core.tokens },
+    catalog: {
+      profile: 'full vs core',
+      tools: full.tools - core.tools,
+      bytes: full.bytes - core.bytes,
+      tokens: full.tokens - core.tokens,
+    },
   };
 }
 

@@ -1,29 +1,48 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DesktopEventClient, ProgressStore, normalizeProgressEvent, parseSseFrame } from '../src/events.js';
+import { DesktopEventClient, normalizeProgressEvent, ProgressStore, parseSseFrame } from '../src/events.js';
 
 test('parses SSE comments and multiline data', () => {
-  assert.deepEqual(parseSseFrame(': keep-alive\nevent: assistant_update\ndata: {"threadId":"t"}\ndata: {"text":"ok"}'), { event:'assistant_update', data:'{"threadId":"t"}\n{"text":"ok"}' });
+  assert.deepEqual(
+    parseSseFrame(': keep-alive\nevent: assistant_update\ndata: {"threadId":"t"}\ndata: {"text":"ok"}'),
+    { event: 'assistant_update', data: '{"threadId":"t"}\n{"text":"ok"}' },
+  );
   assert.equal(parseSseFrame(': heartbeat'), null);
   assert.equal(parseSseFrame('data: ' + 'x'.repeat(600_000)), null);
 });
 
 test('normalizes, filters, redacts, and classifies progress events', () => {
-  const event = normalizeProgressEvent({ threadId:'thread-1', type:'tool_start', tool:'shell', command:'echo authorization=secret', accessToken:'hidden' });
+  const event = normalizeProgressEvent({
+    threadId: 'thread-1',
+    type: 'tool_start',
+    tool: 'shell',
+    command: 'echo authorization=secret',
+    accessToken: 'hidden',
+  });
   assert.equal(event?.kind, 'tool_start');
   assert.equal(event?.threadId, 'thread-1');
   assert.match(event?.raw ? JSON.stringify(event.raw) : '', /REDACTED/);
-  assert.equal(normalizeProgressEvent({ type:'completed' }), null);
-  assert.equal(normalizeProgressEvent({ threadId:'bad/id', type:'x' }), null);
-  assert.equal(normalizeProgressEvent({ threadId:'thread-1', type:'future_event' })?.kind, 'unknown');
+  assert.equal(normalizeProgressEvent({ type: 'completed' }), null);
+  assert.equal(normalizeProgressEvent({ threadId: 'bad/id', type: 'x' }), null);
+  assert.equal(normalizeProgressEvent({ threadId: 'thread-1', type: 'future_event' })?.kind, 'unknown');
 });
 
 test('stores bounded incremental progress and wakes waiters', async () => {
   const store = new ProgressStore();
   store.setConnected(true);
-  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'turn_state', state:'running' });
+  store.append({
+    threadId: 'thread-1',
+    timestamp: new Date().toISOString(),
+    kind: 'turn_state',
+    state: 'running',
+  });
   const pending = store.wait('thread-1', 1, 1000);
-  store.append({ threadId:'thread-1', timestamp:new Date().toISOString(), kind:'completed', state:'completed' });
+  store.append({
+    threadId: 'thread-1',
+    timestamp: new Date().toISOString(),
+    kind: 'completed',
+    state: 'completed',
+  });
   const snapshot = await pending;
   assert.equal(snapshot.events[0]?.kind, 'completed');
   // AI-04 round-trip contract: next is the last delivered sequence.
@@ -32,26 +51,122 @@ test('stores bounded incremental progress and wakes waiters', async () => {
   assert.equal(snapshot.connected, true);
 });
 
+test('progress storage bounds tracked thread IDs and counts event bytes as UTF-8', async () => {
+  const store = new ProgressStore();
+  for (let index = 0; index < 300; index += 1) {
+    store.append({
+      threadId: `thread-${index}`,
+      timestamp: new Date().toISOString(),
+      kind: 'assistant_text',
+      text: '🙂',
+    });
+  }
+  const internal = store as unknown as {
+    byThread: Map<string, Array<{ event: unknown; bytes: number }>>;
+    seq: Map<string, number>;
+  };
+  assert.equal(internal.byThread.size, 256);
+  assert.equal(internal.seq.size, 256);
+  assert.equal(internal.byThread.has('thread-0'), false);
+  const saved = internal.byThread.get('thread-299')?.[0];
+  assert.ok(saved);
+  assert.equal(saved.bytes, Buffer.byteLength(JSON.stringify(saved.event), 'utf8'));
+});
+
+test('progress waits reject excess concurrent waiters and release capacity after wakeup', async () => {
+  const store = new ProgressStore();
+  const pending = Array.from({ length: 256 }, (_, index) => store.wait(`wait-${index}`, 0, 5_000));
+  await assert.rejects(() => store.wait('wait-overflow', 0, 5_000), /Progress wait limit reached/);
+  for (let index = 0; index < 256; index += 1) {
+    store.append({ threadId: `wait-${index}`, timestamp: new Date().toISOString(), kind: 'completed' });
+  }
+  await Promise.all(pending);
+  assert.equal(await store.wait('wait-after-release', 0, 0).then(() => true), true);
+});
+
+test('progress wait cancellation rejects and releases its waiter slot', async () => {
+  const store = new ProgressStore();
+  const controller = new AbortController();
+  const pending = store.wait('cancelled-wait', 0, 50, 50, controller.signal);
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal((store as unknown as { waiterCount: number }).waiterCount, 0);
+});
+
 test('event client sends launch ID and filters by thread through the store', async () => {
-  const previous = globalThis.fetch; const requests: Request[] = [];
+  const previous = globalThis.fetch;
+  const requests: Request[] = [];
   globalThis.fetch = async (input, init) => {
     requests.push(new Request(input, init));
-    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('event: running\ndata: {"threadId":"thread-1","state":"running"}\n\n')); controller.close(); } });
-    return new Response(body, { status:200, headers:{'content-type':'text/event-stream'} });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: running\ndata: {"threadId":"thread-1","state":"running"}\n\n'),
+        );
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
-  const store = new ProgressStore(); const client = new DesktopEventClient(() => new URL('http://127.0.0.1:55354'), () => 'launch-id', store);
-  try { client.start(); for (let i=0; i<20 && !store.read('thread-1').events.length; i++) await new Promise(r => setTimeout(r, 10)); const snapshot = store.read('thread-1'); assert.equal(snapshot.events[0]?.kind, 'turn_state'); assert.equal(requests[0]?.headers.get('x-freebuff-launch-id'), 'launch-id'); } finally { client.dispose(); globalThis.fetch = previous; }
+  const store = new ProgressStore();
+  const client = new DesktopEventClient(
+    () => new URL('http://127.0.0.1:55354'),
+    () => 'launch-id',
+    store,
+  );
+  try {
+    client.start();
+    for (let i = 0; i < 20 && !store.read('thread-1').events.length; i++)
+      await new Promise((r) => setTimeout(r, 10));
+    const snapshot = store.read('thread-1');
+    assert.equal(snapshot.events[0]?.kind, 'turn_state');
+    assert.equal(requests[0]?.headers.get('x-freebuff-launch-id'), 'launch-id');
+  } finally {
+    client.dispose();
+    globalThis.fetch = previous;
+  }
 });
 
 test('event client refreshes authorization before reconnecting', async () => {
-  const previous = globalThis.fetch; const requests: Request[] = []; let launch = 'old-launch-id'; let refreshed = false;
+  const previous = globalThis.fetch;
+  const requests: Request[] = [];
+  let launch = 'old-launch-id';
+  let refreshed = false;
   globalThis.fetch = async (input, init) => {
-    const request = new Request(input, init); requests.push(request);
+    const request = new Request(input, init);
+    requests.push(request);
     if (requests.length === 1) return new Response('forbidden', { status: 403 });
-    const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('event: completed\ndata: {"threadId":"thread-1","state":"completed"}\n\n')); controller.close(); } });
-    return new Response(body, { status:200, headers:{'content-type':'text/event-stream'} });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: completed\ndata: {"threadId":"thread-1","state":"completed"}\n\n'),
+        );
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
-  const store = new ProgressStore(); const client = new DesktopEventClient(() => new URL('http://127.0.0.1:55354'), () => launch, store, async () => { launch = 'new-launch-id'; refreshed = true; return true; });
-  try { client.start(); for (let i=0; i<60 && !store.read('thread-1').events.length; i++) await new Promise(r => setTimeout(r, 10)); assert.equal(refreshed, true); assert.equal(requests[0]?.headers.get('x-freebuff-launch-id'), 'old-launch-id'); assert.equal(requests[1]?.headers.get('x-freebuff-launch-id'), 'new-launch-id'); assert.equal(store.read('thread-1').currentState, 'completed'); }
-  finally { client.dispose(); globalThis.fetch = previous; }
+  const store = new ProgressStore();
+  const client = new DesktopEventClient(
+    () => new URL('http://127.0.0.1:55354'),
+    () => launch,
+    store,
+    async () => {
+      launch = 'new-launch-id';
+      refreshed = true;
+      return true;
+    },
+  );
+  try {
+    client.start();
+    for (let i = 0; i < 60 && !store.read('thread-1').events.length; i++)
+      await new Promise((r) => setTimeout(r, 10));
+    assert.equal(refreshed, true);
+    assert.equal(requests[0]?.headers.get('x-freebuff-launch-id'), 'old-launch-id');
+    assert.equal(requests[1]?.headers.get('x-freebuff-launch-id'), 'new-launch-id');
+    assert.equal(store.read('thread-1').currentState, 'completed');
+  } finally {
+    client.dispose();
+    globalThis.fetch = previous;
+  }
 });

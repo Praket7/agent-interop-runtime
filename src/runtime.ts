@@ -1,13 +1,28 @@
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
-import { Capabilities, ProjectSummary, ThreadDetail, ThreadSummary, Json, ThreadProgressSnapshot } from './types.js';
-import { assertSafeId, blocked, readSafeProjectText, redact, safeProjectPath, sanitizeFreebuff } from './security.js';
-import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, probePty } from './pty.js';
 import { DesktopEventClient, ProgressStore } from './events.js';
+import { isLoopbackHost } from './network.js';
+import { CliPtyManager, findFreebuffCli, findLatestCliConversationId, probePty } from './pty.js';
+import {
+  assertSafeId,
+  blocked,
+  readSafeProjectText,
+  redact,
+  safeProjectPath,
+  sanitizeFreebuff,
+} from './security.js';
+import type {
+  Capabilities,
+  Json,
+  ProjectSummary,
+  ThreadDetail,
+  ThreadProgressSnapshot,
+  ThreadSummary,
+} from './types.js';
 
 export interface Runtime {
   dispose?(): void;
@@ -18,7 +33,13 @@ export interface Runtime {
   getMessages(id: string): Promise<Json>;
   activeWork(id?: string): Promise<Json>;
   getThreadProgress(id: string, afterSequence?: number, limit?: number): Promise<ThreadProgressSnapshot>;
-  watchThread(id: string, afterSequence?: number, timeoutMs?: number, limit?: number): Promise<ThreadProgressSnapshot>;
+  watchThread(
+    id: string,
+    afterSequence?: number,
+    timeoutMs?: number,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<ThreadProgressSnapshot>;
   getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot>;
   watchActiveThreads(): Promise<ThreadProgressSnapshot[]>;
   listFiles(projectId: string, relative?: string): Promise<string[]>;
@@ -31,28 +52,85 @@ export interface Runtime {
   setReasoning(id: string, effort: string | null): Promise<Json>;
 }
 
-async function readJson(file: string): Promise<Json | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')) as Json; } catch { return undefined; } }
-const execFileAsync = promisify(execFile);
-function envRoot(): string { return process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd(); }
-function asRecord(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
-function asString(value: unknown): string | undefined { return typeof value === 'string' && value.length > 0 ? value : undefined; }
-function cliProjectKey(root: string): string { return process.env.FREEBUFF_PROJECT_KEY ?? `${path.basename(root)}--${createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 12)}`; }
-function cliChatsRoots(root: string): string[] { const base = path.join(os.homedir(), '.config', 'manicode', 'projects'); return [path.join(base, cliProjectKey(root), 'chats'), path.join(base, path.basename(root), 'chats')]; }
-async function readLocalJson(file: string): Promise<any | undefined> { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return undefined; } }
-async function readLocalJsonl(file: string): Promise<Json[] | undefined> { try { const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/).filter(Boolean); return lines.map((line) => JSON.parse(line) as Json); } catch { return undefined; } }
-async function cliHistory(root: string): Promise<Array<{ id: string; meta: any; messages: Json[]; state: any }>> {
-  const out: Array<{ id: string; meta: any; messages: Json[]; state: any }> = [];
-  for (const chats of cliChatsRoots(root)) try {
-    for (const entry of await fs.readdir(chats, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
-      const dir = path.join(chats, entry.name); const meta = await readLocalJson(path.join(dir, 'chat-meta.json')); const messages = await readLocalJson(path.join(dir, 'chat-messages.json')) ?? await readLocalJsonl(path.join(dir, 'log.jsonl')); const state = await readLocalJson(path.join(dir, 'run-state.json'));
-      if (meta && Array.isArray(messages)) out.push({ id: entry.name, meta, messages: sanitizeFreebuff(messages) as Json[], state: sanitizeFreebuff(state ?? {}) });
-    }
-  } catch { /* CLI history may not exist yet */ }
-  
-  return out.sort((a, b) => a.id < b.id ? 1 : -1);
+async function readJson(file: string): Promise<Json | undefined> {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8')) as Json;
+  } catch {
+    return undefined;
+  }
 }
-function candidates(): string[] { const home = os.homedir(); return [path.join(home, '.config', 'manicode', 'credentials.json'), path.join(home, 'AppData', 'Roaming', 'manicode', 'credentials.json')]; }
+const execFileAsync = promisify(execFile);
+function envRoot(): string {
+  return process.env.FREEBUFF_PROJECT_ROOT ?? process.cwd();
+}
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function cliProjectKey(root: string): string {
+  return (
+    process.env.FREEBUFF_PROJECT_KEY ??
+    `${path.basename(root)}--${createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 12)}`
+  );
+}
+function cliChatsRoots(root: string): string[] {
+  const base = path.join(os.homedir(), '.config', 'manicode', 'projects');
+  return [path.join(base, cliProjectKey(root), 'chats'), path.join(base, path.basename(root), 'chats')];
+}
+async function readLocalJson(file: string): Promise<any | undefined> {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+async function readLocalJsonl(file: string): Promise<Json[] | undefined> {
+  try {
+    const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/).filter(Boolean);
+    return lines.map((line) => JSON.parse(line) as Json);
+  } catch {
+    return undefined;
+  }
+}
+async function cliHistory(
+  root: string,
+): Promise<Array<{ id: string; meta: any; messages: Json[]; state: any }>> {
+  const out: Array<{ id: string; meta: any; messages: Json[]; state: any }> = [];
+  for (const chats of cliChatsRoots(root))
+    try {
+      for (const entry of await fs.readdir(chats, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^[A-Za-z0-9._:-]{1,200}$/.test(entry.name)) continue;
+        const dir = path.join(chats, entry.name);
+        const meta = await readLocalJson(path.join(dir, 'chat-meta.json'));
+        const messages =
+          (await readLocalJson(path.join(dir, 'chat-messages.json'))) ??
+          (await readLocalJsonl(path.join(dir, 'log.jsonl')));
+        const state = await readLocalJson(path.join(dir, 'run-state.json'));
+        if (meta && Array.isArray(messages))
+          out.push({
+            id: entry.name,
+            meta,
+            messages: sanitizeFreebuff(messages) as Json[],
+            state: sanitizeFreebuff(state ?? {}),
+          });
+      }
+    } catch {
+      /* CLI history may not exist yet */
+    }
+
+  return out.sort((a, b) => (a.id < b.id ? 1 : -1));
+}
+function candidates(): string[] {
+  const home = os.homedir();
+  return [
+    path.join(home, '.config', 'manicode', 'credentials.json'),
+    path.join(home, 'AppData', 'Roaming', 'manicode', 'credentials.json'),
+  ];
+}
 function desktopLogCandidates(): string[] {
   const home = os.homedir();
   return [
@@ -85,24 +163,35 @@ function desktopReadinessCandidates(): string[] {
     path.join(home, '.config', 'Freebuff', 'readiness.json'),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
 }
-type DesktopCandidate = { url: string; launchId?: string; pid?: number; freshness?: number };
+type DesktopAuthSource =
+  | { kind: 'readiness'; file: string }
+  | { kind: 'environment' }
+  | { kind: 'process'; pid: number }
+  | { kind: 'explicit' };
+type DesktopCandidate = {
+  url: string;
+  launchId?: string;
+  pid?: number;
+  freshness?: number;
+  authSource?: DesktopAuthSource;
+};
 /**
  * AI-15: one shared endpoint boundary for every readiness source. Only normalized loopback
  * http(s) URLs pass; remote, malformed, and non-http candidates are rejected before any
  * credential-bearing request can be built.
  */
-function isLoopbackHostname(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  if (host === '::1') return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  return false;
-}
 function isLoopbackHttpUrl(value: string): boolean {
-  try { const url = new URL(value); return (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHostname(url.hostname); } catch { return false; }
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && isLoopbackHost(url.hostname);
+  } catch {
+    return false;
+  }
 }
+
 /** Exported for boundary tests; behavior is identical to the internal check. */
 export { isLoopbackHttpUrl as isLoopbackHttpUrlCheck };
+
 function assertLoopbackCandidateUrl(value: string): string {
   if (!isLoopbackHttpUrl(value)) throw new Error(`Rejected non-loopback readiness candidate ${value}`);
   return value;
@@ -110,12 +199,26 @@ function assertLoopbackCandidateUrl(value: string): string {
 function readinessIsFresh(value: Record<string, unknown> | null): boolean {
   const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
   if (freshnessValue === undefined) return true;
-  const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : NaN;
+  const freshness =
+    typeof freshnessValue === 'number'
+      ? freshnessValue
+      : typeof freshnessValue === 'string'
+        ? Date.parse(freshnessValue)
+        : NaN;
   return Number.isFinite(freshness) && Date.now() - freshness < 10 * 60_000;
 }
 function launchIdFrom(value: Record<string, unknown> | null): string | undefined {
   if (!value) return undefined;
-  for (const key of ['launchId', 'launchID', 'launch_id', 'launch-id', 'freebuffLaunchId', 'authorizationToken', 'authToken', 'token']) {
+  for (const key of [
+    'launchId',
+    'launchID',
+    'launch_id',
+    'launch-id',
+    'freebuffLaunchId',
+    'authorizationToken',
+    'authToken',
+    'token',
+  ]) {
     const found = asString(value[key]);
     if (found && found.length <= 512) return found;
   }
@@ -124,10 +227,6 @@ function launchIdFrom(value: Record<string, unknown> | null): string | undefined
     if (found) return found;
   }
   return undefined;
-}
-function launchIdFromText(text: string): string | undefined {
-  const match = text.match(/(?:x-freebuff-launch-id|freebuff[-_ ]launch[-_ ]id|launchId|launch_id|authorizationToken|authToken)\s*[:=]\s*["']?([A-Za-z0-9._~+/=-]{8,512})/i);
-  return match?.[1];
 }
 /** macOS `ps` requires the `eww` display flags before `-ax` to include environments. */
 export function desktopProcessListArgs(platform = process.platform): string[] {
@@ -142,11 +241,24 @@ async function discoverLiveFreebuffProcess(): Promise<DesktopCandidate | null> {
       const pid = Number(line.match(/^\s*(\d+)/)?.[1]);
       const launchId = line.match(/FREEBUFF_LAUNCH_ID=([^\s]+)/)?.[1];
       if (!launchId || !Number.isInteger(pid) || pid <= 0) continue;
-      const { stdout: sockets } = await execFileAsync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'], { timeout: 2000 });
+      const { stdout: sockets } = await execFileAsync(
+        'lsof',
+        ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN'],
+        { timeout: 2000 },
+      );
       const port = Number(sockets.match(/TCP\s+127\.0\.0\.1:(\d+)\s+\(LISTEN\)/)?.[1]);
-      if (port > 0 && port < 65536) return { url: `http://127.0.0.1:${port}`, launchId, pid, freshness: Date.now() };
+      if (port > 0 && port < 65536)
+        return {
+          url: `http://127.0.0.1:${port}`,
+          launchId,
+          pid,
+          freshness: Date.now(),
+          authSource: { kind: 'process', pid },
+        };
     }
-  } catch { /* process inspection is best effort */ }
+  } catch {
+    /* process inspection is best effort */
+  }
   return null;
 }
 async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
@@ -156,126 +268,203 @@ async function discoverDesktopCandidates(): Promise<DesktopCandidate[]> {
   for (const file of desktopReadinessCandidates()) {
     try {
       const value = asRecord(JSON.parse(await fs.readFile(file, 'utf8')));
-      const port = typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
+      const port =
+        typeof value?.port === 'number' || typeof value?.port === 'string' ? Number(value.port) : undefined;
       // AI-15: readiness-file URLs pass the same loopback boundary as FREEBUFF_ORCHESTRATOR_URL.
-      const url = asString(value?.url) ? assertLoopbackCandidateUrl(asString(value?.url)!) : (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
+      const url = asString(value?.url)
+        ? assertLoopbackCandidateUrl(asString(value?.url)!)
+        : port && port > 0 && port < 65536
+          ? `http://127.0.0.1:${port}`
+          : undefined;
       const launchId = launchIdFrom(value);
       const pidValue = Number(value?.pid ?? value?.processId ?? value?.process_id);
       const freshnessValue = value?.timestamp ?? value?.updatedAt ?? value?.updated_at ?? value?.freshness;
-      const freshness = typeof freshnessValue === 'number' ? freshnessValue : typeof freshnessValue === 'string' ? Date.parse(freshnessValue) : undefined;
-      if (url && readinessIsFresh(value)) candidates.push({ url, launchId, pid: Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined, freshness });
-    } catch { /* readiness metadata is optional */ }
+      const freshness =
+        typeof freshnessValue === 'number'
+          ? freshnessValue
+          : typeof freshnessValue === 'string'
+            ? Date.parse(freshnessValue)
+            : undefined;
+      if (url && readinessIsFresh(value))
+        candidates.push({
+          url,
+          launchId,
+          pid: Number.isInteger(pidValue) && pidValue > 0 ? pidValue : undefined,
+          freshness,
+          authSource: { kind: 'readiness', file },
+        });
+    } catch {
+      /* readiness metadata is optional */
+    }
   }
   if (process.env.FREEBUFF_ORCHESTRATOR_URL) {
     try {
       const configured = new URL(process.env.FREEBUFF_ORCHESTRATOR_URL);
-      if (isLoopbackHttpUrl(configured.toString())) candidates.push({ url: configured.toString(), launchId: process.env.FREEBUFF_LAUNCH_ID });
-    } catch { /* ignore malformed or remote orchestrator URLs */ }
+      if (isLoopbackHttpUrl(configured.toString()))
+        candidates.push({
+          url: configured.toString(),
+          launchId: process.env.FREEBUFF_LAUNCH_ID,
+          authSource: { kind: 'environment' },
+        });
+    } catch {
+      /* ignore malformed or remote orchestrator URLs */
+    }
   }
   const urls = new Set<string>();
   for (const log of desktopLogCandidates()) {
     try {
       const text = await fs.readFile(log, 'utf8');
-      for (const match of text.matchAll(/(?:https?:\/\/)?127\.0\.0\.1:(\d+)/g)) urls.add(`http://127.0.0.1:${match[1]}`);
-      const launchId = launchIdFromText(text);
-      if (launchId) for (const candidate of candidates) if (!candidate.launchId) candidate.launchId = launchId;
-    } catch { /* try the next platform-specific location */ }
+      for (const match of text.matchAll(/(?:https?:\/\/)?127\.0\.0\.1:(\d+)/g))
+        urls.add(`http://127.0.0.1:${match[1]}`);
+    } catch {
+      /* try the next platform-specific location */
+    }
   }
   try {
-    const ports = process.platform === 'win32'
-      ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 | Select-Object -ExpandProperty LocalPort"], { timeout: 2000 })).stdout
-      : (await execFileAsync('sh', ['-c', "command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP -sTCP:LISTEN -a -4 -F n | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p'"], { timeout: 2000 })).stdout;
-    for (const port of ports.match(/\b[0-9]{2,5}\b/g) ?? []) { const n = Number(port); if (n > 0 && n < 65536) urls.add(`http://127.0.0.1:${n}`); }
-  } catch { /* process/IPC fallback is best-effort on systems without the native listener utility */ }
+    const ports =
+      process.platform === 'win32'
+        ? (
+            await execFileAsync(
+              'powershell.exe',
+              [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                'Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 | Select-Object -ExpandProperty LocalPort',
+              ],
+              { timeout: 2000 },
+            )
+          ).stdout
+        : (
+            await execFileAsync(
+              'sh',
+              [
+                '-c',
+                "command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP -sTCP:LISTEN -a -4 -F n | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p'",
+              ],
+              { timeout: 2000 },
+            )
+          ).stdout;
+    for (const port of ports.match(/\b[0-9]{2,5}\b/g) ?? []) {
+      const n = Number(port);
+      if (n > 0 && n < 65536) urls.add(`http://127.0.0.1:${n}`);
+    }
+  } catch {
+    /* process/IPC fallback is best-effort on systems without the native listener utility */
+  }
   const listeners: DesktopCandidate[] = [...urls].reverse().map((url) => ({ url }));
   return [...candidates, ...listeners].sort((a, b) => (b.freshness ?? 0) - (a.freshness ?? 0));
 }
-async function refreshDesktopLaunchId(rejected?: string): Promise<string | undefined> {
-  let fallback: string | undefined;
-  for (const file of desktopReadinessCandidates()) {
-    const value = await readJson(file) as Record<string, unknown> | undefined;
-    const found = readinessIsFresh(value ?? null) ? launchIdFrom(value ?? null) : undefined;
-    if (found) { if (!rejected || found !== rejected) return found; fallback = found; }
-  }
-  for (const log of desktopLogCandidates()) {
-    try { const found = launchIdFromText(await fs.readFile(log, 'utf8')); if (found && (!rejected || found !== rejected)) return found; if (found) fallback = found; } catch { /* optional */ }
-  }
-  const configured = process.env.FREEBUFF_LAUNCH_ID;
-  if (configured && (!rejected || configured !== rejected)) return configured;
-  const live = await discoverLiveFreebuffProcess();
-  if (live?.launchId && (!rejected || live.launchId !== rejected)) return live.launchId;
+function sameDesktopEndpoint(left: string, right: string): boolean {
   try {
-    const processText = process.platform === 'win32'
-      ? (await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"], { timeout: 2500 })).stdout
-      : (await execFileAsync('ps', desktopProcessListArgs(), { timeout: 2500 })).stdout;
-    const found = launchIdFromText(processText);
-    if (found && (!rejected || found !== rejected)) return found;
-    if (found) fallback = found;
-  } catch { /* process inspection is optional and may be restricted */ }
-  return fallback;
-}
-async function discoverDesktopCandidate(): Promise<DesktopCandidate | null> {
-  const seen = new Set<string>();
-  for (const candidate of await discoverDesktopCandidates()) {
-    if (seen.has(candidate.url)) continue;
-    seen.add(candidate.url);
-    try {
-      assertLoopbackCandidateUrl(candidate.url); // AI-15: re-validate at the fetch boundary.
-      let headers: Record<string, string> = { accept: 'application/json', ...(candidate.launchId ? { 'x-freebuff-launch-id': candidate.launchId } : {}) };
-      let response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
-      if (!response.ok && (response.status === 401 || response.status === 403 || response.status === 404)) {
-        const refreshed = await refreshDesktopLaunchId(candidate.launchId);
-        if (refreshed && refreshed !== candidate.launchId) {
-          candidate.launchId = refreshed;
-          headers = { accept: 'application/json', 'x-freebuff-launch-id': refreshed };
-          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
-        }
-      }
-      if (!response.ok) continue;
-      if (!candidate.launchId) {
-        candidate.launchId = await refreshDesktopLaunchId();
-        if (candidate.launchId) {
-          headers = { ...headers, 'x-freebuff-launch-id': candidate.launchId };
-          response = await fetch(new URL('/api/projects', candidate.url), { signal: AbortSignal.timeout(1500), headers, redirect: 'error' });
-          if (!response.ok) continue;
-        }
-      }
-      if (candidate.launchId) {
-        const health = await fetch(new URL('/healthz', candidate.url), { signal: AbortSignal.timeout(1500), headers: { ...headers, redirect: 'error' } });
-        if (!health.ok) continue;
-      }
-      return candidate;
-    } catch { /* try the next discovered endpoint */ }
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
   }
-  return null;
+}
+async function refreshDesktopCandidateLaunchId(
+  candidate: DesktopCandidate,
+  rejected?: string,
+): Promise<string | undefined> {
+  const source = candidate.authSource;
+  if (!source) return undefined;
+  let found: string | undefined;
+  if (source.kind === 'readiness') {
+    const value = asRecord(await readJson(source.file));
+    if (value && readinessIsFresh(value)) {
+      const port =
+        typeof value.port === 'number' || typeof value.port === 'string' ? Number(value.port) : undefined;
+      const url =
+        asString(value.url) ?? (port && port > 0 && port < 65536 ? `http://127.0.0.1:${port}` : undefined);
+      if (url && isLoopbackHttpUrl(url) && sameDesktopEndpoint(url, candidate.url))
+        found = launchIdFrom(value);
+    }
+  } else if (source.kind === 'environment') {
+    const url = process.env.FREEBUFF_ORCHESTRATOR_URL;
+    if (url && sameDesktopEndpoint(url, candidate.url)) found = process.env.FREEBUFF_LAUNCH_ID;
+  } else if (source.kind === 'process') {
+    const live = await discoverLiveFreebuffProcess();
+    if (live?.pid === source.pid && sameDesktopEndpoint(live.url, candidate.url)) found = live.launchId;
+  } else {
+    // The caller supplied this exact endpoint, so an explicitly supplied launch ID may
+    // be paired with it. Tokens from other readiness files/processes are never borrowed.
+    const configuredUrl = process.env.FREEBUFF_ORCHESTRATOR_URL;
+    if (!configuredUrl || sameDesktopEndpoint(configuredUrl, candidate.url))
+      found = process.env.FREEBUFF_LAUNCH_ID;
+  }
+  return found && found !== rejected ? found : undefined;
 }
 
 export class DesktopOrchestratorRuntime implements Runtime {
-  private base: URL; private explicitBase?: string; private launchId?: string; private rejectedLaunchId?: string; private caps?: Capabilities; private capsAt = 0; private refreshing?: Promise<boolean>; private progress = new ProgressStore(); private events = new DesktopEventClient(() => this.base, () => this.launchId, this.progress, () => this.refreshAfterEventFailure());
-  constructor(base?: string) { this.explicitBase = base; this.base = new URL(base ?? 'http://127.0.0.1'); }
-  private invalidateConnection(rejectedLaunchId?: string): void { this.caps = undefined; this.capsAt = 0; if (rejectedLaunchId) this.rejectedLaunchId = rejectedLaunchId; this.launchId = undefined; }
+  private base: URL;
+  private explicitBase?: string;
+  private launchId?: string;
+  private rejectedLaunchId?: string;
+  private caps?: Capabilities;
+  private capsAt = 0;
+  private refreshing?: Promise<boolean>;
+  private progress = new ProgressStore();
+  private events = new DesktopEventClient(
+    () => this.base,
+    () => this.launchId,
+    this.progress,
+    () => this.refreshAfterEventFailure(),
+  );
+  constructor(base?: string) {
+    this.explicitBase = base;
+    this.base = new URL(base ?? 'http://127.0.0.1');
+  }
+  private invalidateConnection(rejectedLaunchId?: string): void {
+    this.caps = undefined;
+    this.capsAt = 0;
+    if (rejectedLaunchId) this.rejectedLaunchId = rejectedLaunchId;
+    this.launchId = undefined;
+  }
   private async rawRequest<T>(method: string, pathname: string, body?: unknown): Promise<T> {
-    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 5000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
     try {
       const launchId = this.launchId;
-      const response = await fetch(new URL(pathname, this.base), { method, signal: controller.signal, headers: { 'content-type': 'application/json', accept: 'application/json', ...(launchId ? { 'x-freebuff-launch-id': launchId } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+      const response = await fetch(new URL(pathname, this.base), {
+        method,
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...(launchId ? { 'x-freebuff-launch-id': launchId } : {}),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
       const raw = await response.text();
       if (!response.ok) {
         let detail = raw;
-        try { const parsed = asRecord(JSON.parse(raw)); detail = asString(parsed?.error) ?? asString(parsed?.message) ?? raw; } catch { /* preserve plain-text errors */ }
-        throw new Error(`Freebuff returned HTTP ${response.status}: ${detail.slice(0, 500)}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`);
+        try {
+          const parsed = asRecord(JSON.parse(raw));
+          detail = asString(parsed?.error) ?? asString(parsed?.message) ?? raw;
+        } catch {
+          /* preserve plain-text errors */
+        }
+        throw new Error(
+          `Freebuff returned HTTP ${response.status}: ${detail.slice(0, 500)}${response.status === 401 || response.status === 403 ? ' and no valid launch authorization was accepted' : ''}`,
+        );
       }
       return (raw ? JSON.parse(raw) : undefined) as T;
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  private shouldRefresh(error: unknown, method: string): boolean { const status = String(error).match(/HTTP (401|403|404)\b/)?.[1]; return Boolean(status && (status !== '404' || method !== 'GET')); }
+  private shouldRefresh(error: unknown, method: string): boolean {
+    const status = String(error).match(/HTTP (401|403|404)\b/)?.[1];
+    return Boolean(status && (status !== '404' || method !== 'GET'));
+  }
   private async request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
-    try { return await this.rawRequest<T>(method, pathname, body); }
-    catch (error) {
+    try {
+      return await this.rawRequest<T>(method, pathname, body);
+    } catch (error) {
       if (!this.shouldRefresh(error, method)) throw error;
       const rejectedLaunchId = this.launchId;
       this.invalidateConnection(rejectedLaunchId);
-      if (!await this.refreshDesktopConnection()) throw error;
+      if (!(await this.refreshDesktopConnection())) throw error;
       return this.rawRequest<T>(method, pathname, body);
     }
   }
@@ -283,9 +472,12 @@ export class DesktopOrchestratorRuntime implements Runtime {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
       const discovered = await discoverDesktopCandidates();
-      const candidates: DesktopCandidate[] = this.explicitBase
-        ? [{ url: this.explicitBase, launchId: await refreshDesktopLaunchId(this.rejectedLaunchId) }, ...discovered]
-        : discovered;
+      const candidates: DesktopCandidate[] = [...discovered];
+      if (this.explicitBase) {
+        const explicit: DesktopCandidate = { url: this.explicitBase, authSource: { kind: 'explicit' } };
+        explicit.launchId = await refreshDesktopCandidateLaunchId(explicit, this.rejectedLaunchId);
+        candidates.unshift(explicit);
+      }
       const seen = new Set<string>();
       for (const candidate of candidates) {
         if (seen.has(candidate.url)) continue;
@@ -294,95 +486,452 @@ export class DesktopOrchestratorRuntime implements Runtime {
           assertLoopbackCandidateUrl(candidate.url);
           this.base = new URL(candidate.url);
           this.launchId = candidate.launchId;
-          if (candidate.launchId && candidate.launchId !== this.rejectedLaunchId) this.rejectedLaunchId = undefined;
-          const projects = await this.rawRequest<unknown>('GET', '/api/projects');
+          if (candidate.launchId && candidate.launchId !== this.rejectedLaunchId)
+            this.rejectedLaunchId = undefined;
+          let projects: unknown;
+          try {
+            projects = await this.rawRequest<unknown>('GET', '/api/projects');
+          } catch (error) {
+            if (!/HTTP (401|403|404)\b/.test(String(error))) throw error;
+            const refreshed = await refreshDesktopCandidateLaunchId(candidate, candidate.launchId);
+            if (!refreshed) throw error;
+            candidate.launchId = refreshed;
+            this.launchId = refreshed;
+            projects = await this.rawRequest<unknown>('GET', '/api/projects');
+          }
           const projectRecord = asRecord(projects);
-          if (!projectRecord || !Array.isArray(projectRecord.projects)) throw new Error('invalid /api/projects response');
+          if (!projectRecord || !Array.isArray(projectRecord.projects))
+            throw new Error('invalid /api/projects response');
           let writable = false;
           if (this.launchId) {
             try {
               const health = await this.rawRequest<unknown>('GET', '/healthz');
               writable = asRecord(health)?.ok === true;
-            } catch { writable = false; }
+            } catch {
+              writable = false;
+            }
           }
           this.events.start();
-          this.caps = { product:'desktop', signedIn:'unknown', orchestrator:true, readOnly:!writable, endpoints:['/api/projects','/api/thread/:id','/api/thread/:id/attachment','/api/events',...(writable ? ['/api/thread/:id/message','/api/thread/:id/stop','/api/thread/:id/resume','/api/thread/:id/agent','/api/thread/:id/effort'] : [])], notes:[`Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`, writable ? 'Desktop connected with verified writes through /healthz.' : 'Desktop connected read-only because launch authorization is missing or stale.', 'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.'] };
+          this.caps = {
+            product: 'desktop',
+            signedIn: 'unknown',
+            orchestrator: true,
+            readOnly: !writable,
+            endpoints: [
+              '/api/projects',
+              '/api/thread/:id',
+              '/api/thread/:id/attachment',
+              '/api/events',
+              ...(writable
+                ? [
+                    '/api/thread/:id/message',
+                    '/api/thread/:id/stop',
+                    '/api/thread/:id/resume',
+                    '/api/thread/:id/agent',
+                    '/api/thread/:id/effort',
+                  ]
+                : []),
+            ],
+            notes: [
+              `Desktop connected at ${candidate.url}${candidate.pid ? ` (PID ${candidate.pid})` : ''}.`,
+              writable
+                ? 'Desktop connected with verified writes through /healthz.'
+                : 'Desktop connected read-only because launch authorization is missing or stale.',
+              'Live progress is enabled; use get_thread_progress_summary to check whether the event stream is connected or stale.',
+            ],
+          };
           this.capsAt = Date.now();
           return writable;
-        } catch { /* stale explicit endpoints and failed discovered candidates are skipped */ }
+        } catch {
+          /* stale explicit endpoints and failed discovered candidates are skipped */
+        }
       }
       this.invalidateConnection();
       return false;
-    })().finally(() => { this.refreshing = undefined; });
+    })().finally(() => {
+      this.refreshing = undefined;
+    });
     return this.refreshing;
   }
-  private async refreshAfterEventFailure(): Promise<boolean> { const rejectedLaunchId = this.launchId; this.invalidateConnection(rejectedLaunchId); return this.refreshDesktopConnection(); }
+  private async refreshAfterEventFailure(): Promise<boolean> {
+    const rejectedLaunchId = this.launchId;
+    this.invalidateConnection(rejectedLaunchId);
+    return this.refreshDesktopConnection();
+  }
   async capabilities(): Promise<Capabilities> {
     if (this.caps && Date.now() - this.capsAt < 4000) return this.caps;
     await this.refreshDesktopConnection();
     if (this.caps) return this.caps;
-    this.caps = { product:'unknown', signedIn:'unknown', orchestrator:false, readOnly:true, endpoints:[], notes:['No Freebuff Desktop or CLI was selected or its authorization could not be verified. Readiness metadata, process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL were checked; use install or doctor for setup details.'] };
+    this.caps = {
+      product: 'unknown',
+      signedIn: 'unknown',
+      orchestrator: false,
+      readOnly: true,
+      endpoints: [],
+      notes: [
+        'No Freebuff Desktop or CLI was selected or its authorization could not be verified. Readiness metadata, process listeners, platform logs, and FREEBUFF_ORCHESTRATOR_URL were checked; use install or doctor for setup details.',
+      ],
+    };
     this.capsAt = Date.now();
     return this.caps;
   }
-  async listProjects(): Promise<ProjectSummary[]> { const record=asRecord(await this.request<unknown>('GET','/api/projects')); if (!record || !Array.isArray(record.projects)) throw new Error('Invalid Freebuff /api/projects response'); return record.projects.flatMap((value) => { const p=asRecord(value); const projectPath=asString(p?.path); return projectPath ? [{ id:projectPath, path:projectPath, name:path.basename(projectPath), metadata:redact(p as Record<string, Json>) as Json }] : []; }); }
-  async listThreads(projectId?: string): Promise<ThreadSummary[]> { const projects = await this.listProjects(); return projects.filter(p=>!projectId||p.id===projectId||p.path===projectId).flatMap(p=>{const raw=asRecord(p.metadata); const threads=Array.isArray(raw?.threads)?raw.threads:[]; return threads.flatMap((value)=>{const t=asRecord(value); const id=asString(t?.id); if(!id)return []; return [{id,projectId:p.id,title:asString(t?.title),state:asString(t?.turnState),model:asString(t?.model),metadata:redact(t as Record<string, Json>) as Json}];});}); }
-  async getThread(id:string):Promise<ThreadDetail>{const value=asRecord(await this.request('GET',`/api/thread/${encodeURIComponent(assertSafeId(id))}`));if(!value)throw new Error('Invalid Freebuff thread response');const threadId=asString(value.id)??assertSafeId(id);return {id:threadId,projectId:asString(value.projectId),title:asString(value.title),state:asString(value.turnState),model:asString(value.model),messages:Array.isArray(value.messages)?sanitizeFreebuff(value.messages) as Json[]:undefined,activeWork:value.activeWork===undefined?undefined:sanitizeFreebuff(value.activeWork) as Json,live:this.progress.read(threadId),metadata:redact(value as Record<string, Json>) as Json};}
-  async getMessages(id:string):Promise<Json>{const t=await this.getThread(id); return sanitizeFreebuff(t.messages ?? []) as Json;}
-  async activeWork(id?:string):Promise<Json>{const threads=await this.listThreads();return threads.filter(t=>(!id||t.id===id)&&t.state&&t.state!=='idle').map(t=>({...t,live:this.progress.read(t.id)})) as unknown as Json;}
-  async getThreadProgress(id:string, afterSequence=0, limit=50):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); return this.progress.read(safe, afterSequence, limit);}
-  async watchThread(id:string, afterSequence=0, timeoutMs=30_000, limit=50):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); return this.progress.wait(safe, afterSequence, timeoutMs, limit);}
-  async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{const safe=assertSafeId(id); await this.capabilities(); const snapshot=this.progress.read(safe, 0, 1); return {...snapshot, events:[]};}
-  async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{await this.capabilities(); return this.progress.active().map(id => this.progress.read(id, 0, 1));}
-  async listFiles(projectId:string, relative='.') { const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId); if(!p) throw new Error('Project not found'); const root=await fs.realpath(p.path); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(projectId:string, relative:string){const p=(await this.listProjects()).find(x=>x.id===projectId||x.path===projectId);if(!p)throw new Error('Project not found');const file=await safeProjectPath(p.path,relative);return {path:relative,content:await readSafeProjectText(file)};}
-  private async assertWritable(): Promise<void> { const writable = await this.refreshDesktopConnection(); const caps = await this.capabilities(); if (!writable || !this.launchId || caps.readOnly) throw new Error('Freebuff Desktop writes are unavailable: no verified launch authorization contract'); }
-  async sendMessage(id:string,text:string){await this.assertWritable();if(!text||text.length>100000)throw new Error('Message must be 1 to 100000 characters');return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/message`,{text})) as Json;}
-  async stop(id:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/stop`,{})) as Json;}
-  async resume(id:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/resume`,{})) as Json;}
-  async listModels(){return {note:'The installed Desktop does not expose a standalone model-catalog route. Use the current thread model and set_model validation.'};}
-  async setModel(id:string,model:string,harnessId='codebuff'){await this.assertWritable();if(model.length>200)throw new Error('Invalid model');return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/agent`,{model,harnessId})) as Json;}
-  async setReasoning(id:string,effort:string){await this.assertWritable();return redact(await this.request('POST',`/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`,{effort})) as Json;}
-  dispose(): void { this.events.dispose(); }
+  async listProjects(): Promise<ProjectSummary[]> {
+    const record = asRecord(await this.request<unknown>('GET', '/api/projects'));
+    if (!record || !Array.isArray(record.projects))
+      throw new Error('Invalid Freebuff /api/projects response');
+    return record.projects.flatMap((value) => {
+      const p = asRecord(value);
+      const projectPath = asString(p?.path);
+      return projectPath
+        ? [
+            {
+              id: projectPath,
+              path: projectPath,
+              name: path.basename(projectPath),
+              metadata: redact(p as Record<string, Json>) as Json,
+            },
+          ]
+        : [];
+    });
+  }
+  async listThreads(projectId?: string): Promise<ThreadSummary[]> {
+    const projects = await this.listProjects();
+    return projects
+      .filter((p) => !projectId || p.id === projectId || p.path === projectId)
+      .flatMap((p) => {
+        const raw = asRecord(p.metadata);
+        const threads = Array.isArray(raw?.threads) ? raw.threads : [];
+        return threads.flatMap((value) => {
+          const t = asRecord(value);
+          const id = asString(t?.id);
+          if (!id) return [];
+          return [
+            {
+              id,
+              projectId: p.id,
+              title: asString(t?.title),
+              state: asString(t?.turnState),
+              model: asString(t?.model),
+              metadata: redact(t as Record<string, Json>) as Json,
+            },
+          ];
+        });
+      });
+  }
+  async getThread(id: string): Promise<ThreadDetail> {
+    const value = asRecord(await this.request('GET', `/api/thread/${encodeURIComponent(assertSafeId(id))}`));
+    if (!value) throw new Error('Invalid Freebuff thread response');
+    const threadId = asString(value.id) ?? assertSafeId(id);
+    return {
+      id: threadId,
+      projectId: asString(value.projectId),
+      title: asString(value.title),
+      state: asString(value.turnState),
+      model: asString(value.model),
+      messages: Array.isArray(value.messages) ? (sanitizeFreebuff(value.messages) as Json[]) : undefined,
+      activeWork: value.activeWork === undefined ? undefined : (sanitizeFreebuff(value.activeWork) as Json),
+      live: this.progress.read(threadId),
+      metadata: redact(value as Record<string, Json>) as Json,
+    };
+  }
+  async getMessages(id: string): Promise<Json> {
+    const t = await this.getThread(id);
+    return sanitizeFreebuff(t.messages ?? []) as Json;
+  }
+  async activeWork(id?: string): Promise<Json> {
+    const threads = await this.listThreads();
+    return threads
+      .filter((t) => (!id || t.id === id) && t.state && t.state !== 'idle')
+      .map((t) => ({ ...t, live: this.progress.read(t.id) })) as unknown as Json;
+  }
+  async getThreadProgress(id: string, afterSequence = 0, limit = 50): Promise<ThreadProgressSnapshot> {
+    const safe = assertSafeId(id);
+    await this.capabilities();
+    return this.progress.read(safe, afterSequence, limit);
+  }
+  async watchThread(
+    id: string,
+    afterSequence = 0,
+    timeoutMs = 30_000,
+    limit = 50,
+    signal?: AbortSignal,
+  ): Promise<ThreadProgressSnapshot> {
+    const safe = assertSafeId(id);
+    await this.capabilities();
+    return this.progress.wait(safe, afterSequence, timeoutMs, limit, signal);
+  }
+  async getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot> {
+    const safe = assertSafeId(id);
+    await this.capabilities();
+    const snapshot = this.progress.read(safe, 0, 1);
+    return { ...snapshot, events: [] };
+  }
+  async watchActiveThreads(): Promise<ThreadProgressSnapshot[]> {
+    await this.capabilities();
+    return this.progress.active().map((id) => this.progress.read(id, 0, 1));
+  }
+  async listFiles(projectId: string, relative = '.') {
+    const p = (await this.listProjects()).find((x) => x.id === projectId || x.path === projectId);
+    if (!p) throw new Error('Project not found');
+    const root = await fs.realpath(p.path);
+    const dir = relative === '.' ? root : await fs.realpath(path.resolve(root, relative));
+    const rel = path.relative(root, dir);
+    if (
+      rel.startsWith('..') ||
+      path.isAbsolute(rel) ||
+      rel.split(path.sep).some((part) => blocked.test(part))
+    )
+      throw new Error('Path escapes the Freebuff project');
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && !blocked.test(e.name))
+      .map((e) => path.relative(root, path.join(dir, e.name)));
+  }
+  async readFile(projectId: string, relative: string) {
+    const p = (await this.listProjects()).find((x) => x.id === projectId || x.path === projectId);
+    if (!p) throw new Error('Project not found');
+    const file = await safeProjectPath(p.path, relative);
+    return { path: relative, content: await readSafeProjectText(file) };
+  }
+  private async assertWritable(): Promise<void> {
+    const writable = await this.refreshDesktopConnection();
+    const caps = await this.capabilities();
+    if (!writable || !this.launchId || caps.readOnly)
+      throw new Error('Freebuff Desktop writes are unavailable: no verified launch authorization contract');
+  }
+  async sendMessage(id: string, text: string) {
+    await this.assertWritable();
+    if (!text || text.length > 100000) throw new Error('Message must be 1 to 100000 characters');
+    return redact(
+      await this.request('POST', `/api/thread/${encodeURIComponent(assertSafeId(id))}/message`, { text }),
+    ) as Json;
+  }
+  async stop(id: string) {
+    await this.assertWritable();
+    return redact(
+      await this.request('POST', `/api/thread/${encodeURIComponent(assertSafeId(id))}/stop`, {}),
+    ) as Json;
+  }
+  async resume(id: string) {
+    await this.assertWritable();
+    return redact(
+      await this.request('POST', `/api/thread/${encodeURIComponent(assertSafeId(id))}/resume`, {}),
+    ) as Json;
+  }
+  async listModels() {
+    return {
+      note: 'The installed Desktop does not expose a standalone model-catalog route. Use the current thread model and set_model validation.',
+    };
+  }
+  async setModel(id: string, model: string, harnessId = 'codebuff') {
+    await this.assertWritable();
+    if (model.length > 200) throw new Error('Invalid model');
+    return redact(
+      await this.request('POST', `/api/thread/${encodeURIComponent(assertSafeId(id))}/agent`, {
+        model,
+        harnessId,
+      }),
+    ) as Json;
+  }
+  async setReasoning(id: string, effort: string) {
+    await this.assertWritable();
+    return redact(
+      await this.request('POST', `/api/thread/${encodeURIComponent(assertSafeId(id))}/effort`, { effort }),
+    ) as Json;
+  }
+  dispose(): void {
+    this.events.dispose();
+  }
 }
 
 export class ReadOnlyRuntime extends DesktopOrchestratorRuntime {
   override async capabilities(): Promise<Capabilities> {
     const caps = await super.capabilities();
-    return { ...caps, readOnly: true, notes: [...caps.notes, 'This MCP process is operating in read-only mode.'] };
+    return {
+      ...caps,
+      readOnly: true,
+      notes: [...caps.notes, 'This MCP process is operating in read-only mode.'],
+    };
   }
-  override async sendMessage(_id: string, _text: string): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
-  override async stop(_id: string): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
-  override async resume(_id: string): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
-  override async setModel(_id: string, _model: string, _harnessId?: string): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
-  override async setReasoning(_id: string, _effort: string | null): Promise<Json>{throw new Error('Freebuff is unavailable or read-only');}
-  override async getThreadProgress(id: string, afterSequence=0, limit=50): Promise<ThreadProgressSnapshot>{ return super.getThreadProgress(id, afterSequence, limit); }
-  override async watchThread(id: string, afterSequence=0, timeoutMs=30_000, limit=50): Promise<ThreadProgressSnapshot>{ return super.watchThread(id, afterSequence, timeoutMs, limit); }
-  override async getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot>{ return super.getThreadProgressSummary(id); }
-  override async watchActiveThreads(): Promise<ThreadProgressSnapshot[]>{ return super.watchActiveThreads(); }
+  override async sendMessage(_id: string, _text: string): Promise<Json> {
+    throw new Error('Freebuff is unavailable or read-only');
+  }
+  override async stop(_id: string): Promise<Json> {
+    throw new Error('Freebuff is unavailable or read-only');
+  }
+  override async resume(_id: string): Promise<Json> {
+    throw new Error('Freebuff is unavailable or read-only');
+  }
+  override async setModel(_id: string, _model: string, _harnessId?: string): Promise<Json> {
+    throw new Error('Freebuff is unavailable or read-only');
+  }
+  override async setReasoning(_id: string, _effort: string | null): Promise<Json> {
+    throw new Error('Freebuff is unavailable or read-only');
+  }
+  override async getThreadProgress(
+    id: string,
+    afterSequence = 0,
+    limit = 50,
+  ): Promise<ThreadProgressSnapshot> {
+    return super.getThreadProgress(id, afterSequence, limit);
+  }
+  override async watchThread(
+    id: string,
+    afterSequence = 0,
+    timeoutMs = 30_000,
+    limit = 50,
+    signal?: AbortSignal,
+  ): Promise<ThreadProgressSnapshot> {
+    return super.watchThread(id, afterSequence, timeoutMs, limit, signal);
+  }
+  override async getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot> {
+    return super.getThreadProgressSummary(id);
+  }
+  override async watchActiveThreads(): Promise<ThreadProgressSnapshot[]> {
+    return super.watchActiveThreads();
+  }
 }
 export class CliPtyRuntime implements Runtime {
   private manager = new CliPtyManager();
   private root = envRoot();
-  async capabilities(): Promise<Capabilities> { const cli = await findFreebuffCli(); const ptyCheck = cli ? await probePty() : undefined; const ready = Boolean(cli && ptyCheck?.ok); const notes = cli ? [ready ? `CLI available and selected at ${cli}; PTY control is enabled for bridge owned sessions. Desktop was not selected.` : `CLI was found at ${cli}, but PTY control is unavailable until the startup probe succeeds.`, ...(ptyCheck?.ok ? ['PTY probe succeeded.'] : [`PTY probe failed on ${ptyCheck?.node ?? process.version} with node pty ${ptyCheck?.nodePty ?? 'unknown'}: ${ptyCheck?.error ?? 'unknown error'}. Reinstall dependencies or rebuild node pty with the supported Node runtime.`])] : ['CLI selected but not installed or not executable. Set FREEBUFF_CLI_PATH to the absolute CLI path or install Freebuff. Live Desktop SSE is unavailable in CLI mode.']; return { product:'cli', signedIn:'unknown', orchestrator:false, readOnly:!ready, endpoints:ready ? ['managed PTY'] : [], notes }; }
-  async listProjects(): Promise<ProjectSummary[]> { return [{ id:this.root, path:this.root, name:path.basename(this.root) }]; }
-  async listThreads(): Promise<ThreadSummary[]> { return (await cliHistory(this.root)).map((c) => ({ id:c.id, projectId:this.root, title:typeof c.meta.firstPrompt==='string'?c.meta.firstPrompt:'Managed Freebuff CLI session', state:typeof c.state?.sessionState?.mainAgentState==='object'?'completed':undefined, metadata:{messageCount:c.meta.messageCount, conversationId:c.id} })); }
-  async getThread(id:string): Promise<ThreadDetail> { const safe=assertSafeId(id); const c=(await cliHistory(this.root)).find((x)=>x.id===safe); if(c) return { id:safe, projectId:this.root, title:typeof c.meta.firstPrompt==='string'?c.meta.firstPrompt:'Managed Freebuff CLI session', messages:c.messages, metadata:{messageCount:c.meta.messageCount, conversationId:safe} }; return { id:safe, projectId:this.root, title:'Managed Freebuff CLI session', metadata:redact(this.manager.snapshot(safe)) as Json }; }
-  async getMessages(id:string): Promise<Json> { const c=(await cliHistory(this.root)).find((x)=>x.id===assertSafeId(id)); return c ? c.messages : redact(this.manager.snapshot(id)) as Json; }
-  async activeWork(id?:string): Promise<Json> { return id ? redact(this.manager.snapshot(id)) as Json : []; }
-  async getThreadProgress(id:string):Promise<ThreadProgressSnapshot>{ try { return this.manager.snapshot(id).progress; } catch { return {threadId:assertSafeId(id),events:[],connected:false,stale:true,lastError:'No live managed PTY is attached to this conversation'}; } }
-  async watchThread(id:string):Promise<ThreadProgressSnapshot>{ return this.getThreadProgress(id); }
-  async getThreadProgressSummary(id:string):Promise<ThreadProgressSnapshot>{ const progress = await this.getThreadProgress(id); return {...progress, events:[]}; }
-  async watchActiveThreads():Promise<ThreadProgressSnapshot[]>{ return []; }
-  async listFiles(_projectId:string, relative='.') { const root=await fs.realpath(this.root); const dir=relative==='.'?root:await fs.realpath(path.resolve(root,relative)); const rel=path.relative(root,dir); if(rel.startsWith('..')||path.isAbsolute(rel)||rel.split(path.sep).some(part=>blocked.test(part))) throw new Error('Path escapes the Freebuff project'); const entries=await fs.readdir(dir,{withFileTypes:true}); return entries.filter(e=>e.isFile()&&!blocked.test(e.name)).map(e=>path.relative(root,path.join(dir,e.name))); }
-  async readFile(_projectId:string, relative:string): Promise<{path:string;content:string}> { const file=await safeProjectPath(this.root,relative); return {path:relative,content:await readSafeProjectText(file)}; }
-  async sendMessage(id:string,text:string): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,text,this.root,id)) as Json; }
-  async stop(id:string): Promise<Json> { return redact(this.manager.stop(id)) as Json; }
-  async resume(id:string): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,'/resume',this.root,id)) as Json; }
-  async listModels(): Promise<Json> { return { note:'Use the Freebuff CLI /model picker inside a managed PTY session.' }; }
-  async setModel(id:string,model:string): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,`/model ${model}`,this.root,id)) as Json; }
-  async setReasoning(id:string,effort:string|null): Promise<Json> { if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable'); return redact(await this.manager.send(id,`/reasoning ${effort ?? ''}`,this.root,id)) as Json; }
-  dispose(): void { this.manager.dispose(); }
+  async capabilities(): Promise<Capabilities> {
+    const cli = await findFreebuffCli();
+    const ptyCheck = cli ? await probePty() : undefined;
+    const ready = Boolean(cli && ptyCheck?.ok);
+    const notes = cli
+      ? [
+          ready
+            ? `CLI available and selected at ${cli}; PTY control is enabled for bridge owned sessions. Desktop was not selected.`
+            : `CLI was found at ${cli}, but PTY control is unavailable until the startup probe succeeds.`,
+          ...(ptyCheck?.ok
+            ? ['PTY probe succeeded.']
+            : [
+                `PTY probe failed on ${ptyCheck?.node ?? process.version} with node pty ${ptyCheck?.nodePty ?? 'unknown'}: ${ptyCheck?.error ?? 'unknown error'}. Reinstall dependencies or rebuild node pty with the supported Node runtime.`,
+              ]),
+        ]
+      : [
+          'CLI selected but not installed or not executable. Set FREEBUFF_CLI_PATH to the absolute CLI path or install Freebuff. Live Desktop SSE is unavailable in CLI mode.',
+        ];
+    return {
+      product: 'cli',
+      signedIn: 'unknown',
+      orchestrator: false,
+      readOnly: !ready,
+      endpoints: ready ? ['managed PTY'] : [],
+      notes,
+    };
+  }
+  async listProjects(): Promise<ProjectSummary[]> {
+    return [{ id: this.root, path: this.root, name: path.basename(this.root) }];
+  }
+  async listThreads(): Promise<ThreadSummary[]> {
+    return (await cliHistory(this.root)).map((c) => ({
+      id: c.id,
+      projectId: this.root,
+      title: typeof c.meta.firstPrompt === 'string' ? c.meta.firstPrompt : 'Managed Freebuff CLI session',
+      state: typeof c.state?.sessionState?.mainAgentState === 'object' ? 'completed' : undefined,
+      metadata: { messageCount: c.meta.messageCount, conversationId: c.id },
+    }));
+  }
+  async getThread(id: string): Promise<ThreadDetail> {
+    const safe = assertSafeId(id);
+    const c = (await cliHistory(this.root)).find((x) => x.id === safe);
+    if (c)
+      return {
+        id: safe,
+        projectId: this.root,
+        title: typeof c.meta.firstPrompt === 'string' ? c.meta.firstPrompt : 'Managed Freebuff CLI session',
+        messages: c.messages,
+        metadata: { messageCount: c.meta.messageCount, conversationId: safe },
+      };
+    return {
+      id: safe,
+      projectId: this.root,
+      title: 'Managed Freebuff CLI session',
+      metadata: redact(this.manager.snapshot(safe)) as Json,
+    };
+  }
+  async getMessages(id: string): Promise<Json> {
+    const c = (await cliHistory(this.root)).find((x) => x.id === assertSafeId(id));
+    return c ? c.messages : (redact(this.manager.snapshot(id)) as Json);
+  }
+  async activeWork(id?: string): Promise<Json> {
+    return id ? (redact(this.manager.snapshot(id)) as Json) : [];
+  }
+  async getThreadProgress(id: string): Promise<ThreadProgressSnapshot> {
+    try {
+      return this.manager.snapshot(id).progress;
+    } catch {
+      return {
+        threadId: assertSafeId(id),
+        events: [],
+        connected: false,
+        stale: true,
+        lastError: 'No live managed PTY is attached to this conversation',
+      };
+    }
+  }
+  async watchThread(
+    id: string,
+    _afterSequence?: number,
+    _timeoutMs?: number,
+    _limit?: number,
+    signal?: AbortSignal,
+  ): Promise<ThreadProgressSnapshot> {
+    signal?.throwIfAborted();
+    return this.getThreadProgress(id);
+  }
+  async getThreadProgressSummary(id: string): Promise<ThreadProgressSnapshot> {
+    const progress = await this.getThreadProgress(id);
+    return { ...progress, events: [] };
+  }
+  async watchActiveThreads(): Promise<ThreadProgressSnapshot[]> {
+    return [];
+  }
+  async listFiles(_projectId: string, relative = '.') {
+    const root = await fs.realpath(this.root);
+    const dir = relative === '.' ? root : await fs.realpath(path.resolve(root, relative));
+    const rel = path.relative(root, dir);
+    if (
+      rel.startsWith('..') ||
+      path.isAbsolute(rel) ||
+      rel.split(path.sep).some((part) => blocked.test(part))
+    )
+      throw new Error('Path escapes the Freebuff project');
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile() && !blocked.test(e.name))
+      .map((e) => path.relative(root, path.join(dir, e.name)));
+  }
+  async readFile(_projectId: string, relative: string): Promise<{ path: string; content: string }> {
+    const file = await safeProjectPath(this.root, relative);
+    return { path: relative, content: await readSafeProjectText(file) };
+  }
+  async sendMessage(id: string, text: string): Promise<Json> {
+    if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable');
+    return redact(await this.manager.send(id, text, this.root, id)) as Json;
+  }
+  async stop(id: string): Promise<Json> {
+    return redact(this.manager.stop(id)) as Json;
+  }
+  async resume(id: string): Promise<Json> {
+    if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable');
+    return redact(await this.manager.send(id, '/resume', this.root, id)) as Json;
+  }
+  async listModels(): Promise<Json> {
+    return { note: 'Use the Freebuff CLI /model picker inside a managed PTY session.' };
+  }
+  async setModel(id: string, model: string): Promise<Json> {
+    if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable');
+    return redact(await this.manager.send(id, `/model ${model}`, this.root, id)) as Json;
+  }
+  async setReasoning(id: string, effort: string | null): Promise<Json> {
+    if ((await this.capabilities()).readOnly) throw new Error('Freebuff CLI PTY control is unavailable');
+    return redact(await this.manager.send(id, `/reasoning ${effort ?? ''}`, this.root, id)) as Json;
+  }
+  dispose(): void {
+    this.manager.dispose();
+  }
 }
 export async function detectRuntime(): Promise<Runtime> {
   if (process.env.FREEBUFF_MCP_CLI_MODE === 'pty') return new CliPtyRuntime();
@@ -391,4 +940,16 @@ export async function detectRuntime(): Promise<Runtime> {
   if (await findFreebuffCli()) return new CliPtyRuntime();
   return new ReadOnlyRuntime();
 }
-export async function localInstallInfo(): Promise<Json> { const found: Array<{path:string;signedIn:boolean}> = []; for(const c of candidates()){const j=await readJson(c); const o=j&&typeof j==='object'&&!Array.isArray(j)?j as Record<string,Json>:undefined; const d=o?.default&&typeof o.default==='object'&&!Array.isArray(o.default)?o.default as Record<string,Json>:undefined; if(o) found.push({path:c,signedIn:Boolean(d?.authToken||o.authToken)});} return {cli: Boolean(await findFreebuffCli()),credentials:found}; }
+export async function localInstallInfo(): Promise<Json> {
+  const found: Array<{ path: string; signedIn: boolean }> = [];
+  for (const c of candidates()) {
+    const j = await readJson(c);
+    const o = j && typeof j === 'object' && !Array.isArray(j) ? (j as Record<string, Json>) : undefined;
+    const d =
+      o?.default && typeof o.default === 'object' && !Array.isArray(o.default)
+        ? (o.default as Record<string, Json>)
+        : undefined;
+    if (o) found.push({ path: c, signedIn: Boolean(d?.authToken || o.authToken) });
+  }
+  return { cli: Boolean(await findFreebuffCli()), credentials: found };
+}

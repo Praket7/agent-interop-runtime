@@ -1,33 +1,66 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import { createServer } from '../src/mcp.js';
-import { profileToolset, parseProfile, activeProfile, PROFILE_IDS } from '../src/profiles.js';
+import { activeProfile, PROFILE_IDS, parseProfile, profileToolset } from '../src/profiles.js';
 import type { Runtime } from '../src/runtime.js';
 
 function fakeRuntime(): Runtime {
   return {
-    capabilities: async () => ({ product: 'unknown', signedIn: 'unknown', orchestrator: false, readOnly: true, endpoints: [], notes: [] }),
-    listProjects: async () => [], listThreads: async () => [], getThread: async () => ({}), getMessages: async () => [],
-    activeWork: async () => [], getThreadProgress: async () => ({ events: [], connected: false, stale: true }), watchThread: async () => ({ events: [], connected: false, stale: true }),
-    getThreadProgressSummary: async () => ({ events: [], connected: false, stale: true }), watchActiveThreads: async () => [],
-    listFiles: async () => [], readFile: async () => ({ path: '', content: '' }),
-    sendMessage: async () => ({}), stop: async () => ({}), resume: async () => ({}), listModels: async () => ({}), setModel: async () => ({}), setReasoning: async () => ({}),
+    capabilities: async () => ({
+      product: 'unknown',
+      signedIn: 'unknown',
+      orchestrator: false,
+      readOnly: true,
+      endpoints: [],
+      notes: [],
+    }),
+    listProjects: async () => [],
+    listThreads: async () => [],
+    getThread: async () => ({}),
+    getMessages: async () => [],
+    activeWork: async () => [],
+    getThreadProgress: async () => ({ events: [], connected: false, stale: true }),
+    watchThread: async () => ({ events: [], connected: false, stale: true }),
+    getThreadProgressSummary: async () => ({ events: [], connected: false, stale: true }),
+    watchActiveThreads: async () => [],
+    listFiles: async () => [],
+    readFile: async () => ({ path: '', content: '' }),
+    sendMessage: async () => ({}),
+    stop: async () => ({}),
+    resume: async () => ({}),
+    listModels: async () => ({}),
+    setModel: async () => ({}),
+    setReasoning: async () => ({}),
   } as unknown as Runtime;
 }
 
-function toolNames(server: unknown): string[] { return Object.keys((server as { _registeredTools: Record<string, unknown> })._registeredTools); }
+function toolNames(server: unknown): string[] {
+  return Object.keys((server as { _registeredTools: Record<string, unknown> })._registeredTools);
+}
 
 /** Serialized catalog size using the same formula as the audit measurement. */
 function catalogBytes(server: unknown): number {
-  const tools = (server as { _registeredTools: Record<string, { title?: string; description?: string; inputSchema?: unknown }> })._registeredTools;
+  const tools = (
+    server as {
+      _registeredTools: Record<string, { title?: string; description?: string; inputSchema?: unknown }>;
+    }
+  )._registeredTools;
   let total = 0;
   for (const tool of Object.values(tools)) {
-    if (typeof tool.inputSchema === 'object' && tool.inputSchema !== null && '_def' in (tool.inputSchema as object)) {
+    if (
+      typeof tool.inputSchema === 'object' &&
+      tool.inputSchema !== null &&
+      '_def' in (tool.inputSchema as object)
+    ) {
       // Raw zod schema (no MCP client conversion): measure name + description, which is
       // what a host actually sees in tool discovery before schema conversion.
       total += JSON.stringify({ name: tool.title, description: tool.description }).length;
     } else {
-      total += JSON.stringify({ name: tool.title, description: tool.description, inputSchema: tool.inputSchema }).length;
+      total += JSON.stringify({
+        name: tool.title,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+      }).length;
     }
   }
   return total;
@@ -38,7 +71,20 @@ test('profiles: default exposes a predictable nine-tool provider surface', () =>
   assert.equal(parseProfile(undefined), 'minimal');
   assert.equal(parseProfile('MINIMAL'), 'minimal');
   assert.equal(names.length, 9);
-  assert.deepEqual(names, ['cancel_session', 'create_session', 'get_runtime_status', 'get_session_diff', 'list_agent_sessions', 'list_providers', 'read_session_events', 'resume_session', 'send_session_message'].sort());
+  assert.deepEqual(
+    names,
+    [
+      'cancel_session',
+      'create_session',
+      'get_runtime_status',
+      'get_session_diff',
+      'list_agent_sessions',
+      'list_providers',
+      'read_session_events',
+      'resume_session',
+      'send_session_message',
+    ].sort(),
+  );
 });
 
 test('profiles: catalog sizes stay within their intended budgets', () => {
@@ -50,10 +96,33 @@ test('profiles: catalog sizes stay within their intended budgets', () => {
 
 test('profiles: core keeps interop and coordination while omitting Freebuff-specific tools', () => {
   const names = toolNames(createServer(fakeRuntime(), true, 'core'));
-  for (const name of ['list_providers', 'list_agent_sessions', 'read_conversation', 'get_work', 'send_session_message', 'create_conversation', 'join_conversation', 'send_conversation_message', 'create_handoff', 'create_work', 'verify_work', 'create_review', 'request_review']) {
+  for (const name of [
+    'list_providers',
+    'list_agent_sessions',
+    'read_conversation',
+    'get_work',
+    'send_session_message',
+    'create_conversation',
+    'join_conversation',
+    'send_conversation_message',
+    'create_handoff',
+    'create_work',
+    'verify_work',
+    'create_review',
+    'request_review',
+  ]) {
     assert.ok(names.includes(name), `core must keep ${name}`);
   }
-  for (const name of ['list_projects', 'list_threads', 'read_project_file', 'send_thread_message', 'stop_thread', 'resume_thread', 'set_thread_model', 'set_thread_reasoning']) {
+  for (const name of [
+    'list_projects',
+    'list_threads',
+    'read_project_file',
+    'send_thread_message',
+    'stop_thread',
+    'resume_thread',
+    'set_thread_model',
+    'set_thread_reasoning',
+  ]) {
     assert.equal(names.includes(name), false, `core must omit Freebuff-specific tool ${name}`);
   }
 });
@@ -79,7 +148,10 @@ test('profiles: legacy keeps all 52 old names while full exposes modern names', 
 test('profiles: core catalog is smaller than full', () => {
   const coreBytes = catalogBytes(createServer(fakeRuntime(), true, 'core'));
   const fullBytes = catalogBytes(createServer(fakeRuntime(), true, 'full'));
-  assert.ok(coreBytes < fullBytes * 0.80, `core catalog (${coreBytes}B) should be materially smaller than full (${fullBytes}B)`);
+  assert.ok(
+    coreBytes < fullBytes * 0.8,
+    `core catalog (${coreBytes}B) should be materially smaller than full (${fullBytes}B)`,
+  );
 });
 
 test('profiles: read-only composes with profiles instead of being overridden', () => {
@@ -92,11 +164,19 @@ test('profiles: read-only composes with profiles instead of being overridden', (
 });
 
 test('profiles: runtime status reports the active profile', async () => {
-  const server = createServer(fakeRuntime(), true, 'core') as unknown as { _registeredTools: Record<string, { handler?: (args: Record<string, never>) => Promise<{ content: Array<{ text: string }> }> }> };
+  const server = createServer(fakeRuntime(), true, 'core') as unknown as {
+    _registeredTools: Record<
+      string,
+      { handler?: (args: Record<string, never>) => Promise<{ content: Array<{ text: string }> }> }
+    >;
+  };
   const status = server._registeredTools['get_runtime_status'];
   assert.ok(status?.handler, 'get_runtime_status must be registered and expose its handler');
   const result = await status.handler!({});
-  const payload = JSON.parse(result.content[0]!.text) as { toolsetProfile: string; toolsetProfileDescription: string };
+  const payload = JSON.parse(result.content[0]!.text) as {
+    toolsetProfile: string;
+    toolsetProfileDescription: string;
+  };
   assert.equal(payload.toolsetProfile, 'core');
   assert.match(payload.toolsetProfileDescription, /Core:/);
 });
@@ -117,14 +197,22 @@ test('profiles: minimal and freebuff expose purpose-built narrow surfaces', () =
 test('modern catalogs use verb-first names and leave old names to legacy', () => {
   for (const profile of ['minimal', 'core', 'freebuff', 'full'] as const) {
     for (const name of toolNames(createServer(fakeRuntime(), true, profile))) {
-      assert.match(name, /^(get|list|read|send|cancel|create|resume|set|stop|respond|reconcile|join|update|acquire|release|request|verify)_[a-z]+(?:_[a-z]+)*$/, `${profile} tool ${name} must use verb_resource naming`);
+      assert.match(
+        name,
+        /^(get|list|read|send|cancel|create|resume|set|stop|respond|reconcile|join|update|acquire|release|request|verify)_[a-z]+(?:_[a-z]+)*$/,
+        `${profile} tool ${name} must use verb_resource naming`,
+      );
     }
   }
 });
 
 test('modern descriptions use the names of the alternatives visible in that profile', () => {
-  const modern = createServer(fakeRuntime(), true, 'full') as unknown as { _registeredTools: Record<string, { description?: string; title?: string }> };
-  const legacy = createServer(fakeRuntime(), true, 'legacy') as unknown as { _registeredTools: Record<string, { description?: string }> };
+  const modern = createServer(fakeRuntime(), true, 'full') as unknown as {
+    _registeredTools: Record<string, { description?: string; title?: string }>;
+  };
+  const legacy = createServer(fakeRuntime(), true, 'legacy') as unknown as {
+    _registeredTools: Record<string, { description?: string }>;
+  };
   assert.match(modern._registeredTools['get_session_diff']!.description!, /read_session_events/);
   assert.doesNotMatch(modern._registeredTools['get_session_diff']!.description!, /events_page/);
   assert.match(modern._registeredTools['get_session_diff']!.title!, /Get Session Diff/);
@@ -132,21 +220,73 @@ test('modern descriptions use the names of the alternatives visible in that prof
 });
 
 test('verification is annotated as potentially destructive because configured commands can change files', () => {
-  const server = createServer(fakeRuntime(), true, 'core') as unknown as { _registeredTools: Record<string, { annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean }; description?: string }> };
+  const server = createServer(fakeRuntime(), true, 'core') as unknown as {
+    _registeredTools: Record<
+      string,
+      { annotations?: { destructiveHint?: boolean; readOnlyHint?: boolean }; description?: string }
+    >;
+  };
   const verify = server._registeredTools['verify_work'];
   assert.equal(verify?.annotations?.readOnlyHint, false);
   assert.equal(verify?.annotations?.destructiveHint, true);
   assert.match(verify?.description ?? '', /may modify or delete files/i);
 });
 
+test('tool annotations distinguish provider traffic from local coordination and destructive state changes', () => {
+  const server = createServer(fakeRuntime(), true, 'full') as unknown as {
+    _registeredTools: Record<
+      string,
+      {
+        annotations?: {
+          openWorldHint?: boolean;
+          readOnlyHint?: boolean;
+          destructiveHint?: boolean;
+          idempotentHint?: boolean;
+        };
+      }
+    >;
+  };
+  const tools = server._registeredTools;
+  assert.ok(Object.values(tools).every((tool) => typeof tool.annotations?.openWorldHint === 'boolean'));
+  assert.equal(tools['list_providers']?.annotations?.openWorldHint, true);
+  assert.equal(tools['get_evidence']?.annotations?.openWorldHint, false);
+  assert.equal(tools['send_session_message']?.annotations?.openWorldHint, true);
+  assert.equal(tools['create_work']?.annotations?.openWorldHint, false);
+  assert.equal(tools['create_work']?.annotations?.destructiveHint, false);
+  assert.equal(tools['release_claim']?.annotations?.destructiveHint, true);
+  assert.equal(tools['verify_work']?.annotations?.destructiveHint, true);
+  assert.ok(
+    Object.values(tools)
+      .filter((tool) => tool.annotations?.readOnlyHint === false)
+      .every((tool) => typeof tool.annotations?.idempotentHint === 'boolean'),
+  );
+});
+
 test('progress tools consolidate raw waits and summaries for one or all threads', async () => {
   const calls: Array<[string, unknown]> = [];
   const runtime = fakeRuntime() as unknown as Record<string, unknown>;
-  runtime.getThreadProgress = async (...args: unknown[]) => { calls.push(['get', args]); return { kind: 'snapshot' }; };
-  runtime.watchThread = async (...args: unknown[]) => { calls.push(['watch', args]); return { kind: 'waited' }; };
-  runtime.getThreadProgressSummary = async (...args: unknown[]) => { calls.push(['summary', args]); return { kind: 'summary' }; };
-  runtime.watchActiveThreads = async (...args: unknown[]) => { calls.push(['active', args]); return { kind: 'active' }; };
-  const server = createServer(runtime as unknown as Runtime, true, 'freebuff') as unknown as { _registeredTools: Record<string, { handler?: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }> };
+  runtime.getThreadProgress = async (...args: unknown[]) => {
+    calls.push(['get', args]);
+    return { kind: 'snapshot' };
+  };
+  runtime.watchThread = async (...args: unknown[]) => {
+    calls.push(['watch', args]);
+    return { kind: 'waited' };
+  };
+  runtime.getThreadProgressSummary = async (...args: unknown[]) => {
+    calls.push(['summary', args]);
+    return { kind: 'summary' };
+  };
+  runtime.watchActiveThreads = async (...args: unknown[]) => {
+    calls.push(['active', args]);
+    return { kind: 'active' };
+  };
+  const server = createServer(runtime as unknown as Runtime, true, 'freebuff') as unknown as {
+    _registeredTools: Record<
+      string,
+      { handler?: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> }
+    >;
+  };
   const raw = server._registeredTools['get_thread_progress']?.handler;
   const summary = server._registeredTools['get_thread_progress_summary']?.handler;
   assert.ok(raw && summary);
@@ -154,7 +294,12 @@ test('progress tools consolidate raw waits and summaries for one or all threads'
   await raw({ threadId: 't1', timeoutMs: 2000 });
   await summary({ threadId: 't1' });
   await summary({});
-  assert.deepEqual(calls, [['get', ['t1', undefined, undefined]], ['watch', ['t1', undefined, 2000, undefined]], ['summary', ['t1']], ['active', []]]);
+  assert.deepEqual(calls, [
+    ['get', ['t1', undefined, undefined]],
+    ['watch', ['t1', undefined, 2000, undefined, undefined]],
+    ['summary', ['t1']],
+    ['active', []],
+  ]);
   const names = toolNames(server);
   assert.equal(names.includes('watch_thread'), false);
   assert.equal(names.includes('watch_active_threads'), false);
@@ -171,6 +316,7 @@ test('profiles: INTEROP_TOOLS_PROFILE env selects the catalog', () => {
     process.env.INTEROP_TOOLS_PROFILE = 'core';
     assert.equal(activeProfile(), 'core');
   } finally {
-    if (previous === undefined) delete process.env.INTEROP_TOOLS_PROFILE; else process.env.INTEROP_TOOLS_PROFILE = previous;
+    if (previous === undefined) delete process.env.INTEROP_TOOLS_PROFILE;
+    else process.env.INTEROP_TOOLS_PROFILE = previous;
   }
 });

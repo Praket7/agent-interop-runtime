@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Support the current MCP protocol alongside the existing session-based protocol over stdio and HTTP.
+- Pass MCP cancellations into progress waits and verification commands, stop cancelled process trees, and retain partial evidence without marking interrupted work as passed.
+- Declare object schemas for tool inputs and a structured result envelope, and check tool descriptions against each profile.
+- Keep CI and publishing installs pinned to the committed dependency lockfile.
+
 ## 1.0.2
 
 - Accept valid quoted TOML table keys used by Codex plugin configurations so the installer can safely preserve and update real user config files.

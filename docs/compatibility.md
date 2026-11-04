@@ -6,6 +6,8 @@ The runtime asks each installed provider what it supports. Your doctor report is
 
 The test suite checks protocol behavior with simulated Freebuff, OpenCode, Codex, Claude, and Cursor responses. It also checks unavailable-provider behavior, message delivery records, project path rules, credential handling, and verification working folders.
 
+Production-entry integration checks cover both the 2026-07-28 MCP protocol and the earlier 2025-11-25 protocol over stdio and HTTP. The HTTP check also exercises the legacy session stream route. These tests validate protocol and routing behavior, while provider behavior remains subject to the installed app, provider version, and account.
+
 The benchmark runs three tasks against simulated providers. It observed zero duplicate sends in the current run. It does not measure completion quality, provider latency, or actual provider use.
 
 GitHub CI checks three operating systems with four supported Node versions. The package supports Node 20 through Node 26.

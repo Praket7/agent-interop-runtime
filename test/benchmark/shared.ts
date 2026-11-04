@@ -15,11 +15,16 @@
  */
 
 import { getEncoding } from 'js-tiktoken';
-import type { Json } from '../../src/types.js';
 import type {
-  AgentAdapter, AgentCapabilities, AgentEvent, AgentSession, AgentSendOptions,
-  OperationReceipt, ProviderId,
+  AgentAdapter,
+  AgentCapabilities,
+  AgentEvent,
+  AgentSendOptions,
+  AgentSession,
+  OperationReceipt,
+  ProviderId,
 } from '../../src/interop.js';
+import type { Json } from '../../src/types.js';
 
 // Named tokenizer: OpenAI's o200k_base BPE ranks via js-tiktoken (fully offline).
 // Counts are an offline estimate of prompt-size cost, NOT native provider usage.
@@ -37,7 +42,12 @@ export function countBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
-export type UsageObservation = { provider: ProviderId; nativeId: string; kind: 'send' | 'steer' | 'cancel'; at: string };
+export type UsageObservation = {
+  provider: ProviderId;
+  nativeId: string;
+  kind: 'send' | 'steer' | 'cancel';
+  at: string;
+};
 
 /**
  * In-memory provider adapter conforming to the real AgentAdapter contract. It records
@@ -57,15 +67,26 @@ export class InMemoryProvider implements AgentAdapter {
   private readonly waiters = new Map<string, Array<(event: AgentEvent) => void>>();
   private readonly runState = new Map<string, 'idle' | 'running' | 'blocked' | 'completed' | 'cancelled'>();
 
-  constructor(id: ProviderId, displayName: string, seedSessions: Array<{ nativeId: string; cwd?: string; title?: string }> = []) {
+  constructor(
+    id: ProviderId,
+    displayName: string,
+    seedSessions: Array<{ nativeId: string; cwd?: string; title?: string }> = [],
+  ) {
     this.id = id;
     this.displayName = displayName;
     for (const seed of seedSessions) {
       const nativeId = seed.nativeId;
       const session: AgentSession = {
-        provider: id, nativeId, transport: 'in-memory', cwd: seed.cwd,
+        provider: id,
+        nativeId,
+        transport: 'in-memory',
+        cwd: seed.cwd,
         title: seed.title ?? `${displayName} ${nativeId}`,
-        id: `${id}:${nativeId}`, state: 'idle', model: 'bench-model', metadata: {}, live: false,
+        id: `${id}:${nativeId}`,
+        state: 'idle',
+        model: 'bench-model',
+        metadata: {},
+        live: false,
         provenance: { discoveredAt: new Date().toISOString(), source: 'benchmark', native: true },
       };
       this.sessions.set(nativeId, session);
@@ -75,25 +96,48 @@ export class InMemoryProvider implements AgentAdapter {
   async capabilities(): Promise<AgentCapabilities> {
     const record = (transport: string) => ({ supported: true, state: 'available' as const, transport });
     return {
-      provider: this.id, adapterVersion: 'bench', authorization: 'authorized',
-      discovery: record('in-memory'), sessions: record('in-memory'), sendMessage: record('in-memory'),
-      steer: record('in-memory'), cancel: record('in-memory'), events: record('in-memory'),
-      diff: record('in-memory'), permissions: { supported: false, state: 'unavailable' as const, reason: 'not exercised in offline benchmark' },
-      model: record('in-memory'), reasoning: record('in-memory'),
+      provider: this.id,
+      adapterVersion: 'bench',
+      authorization: 'authorized',
+      discovery: record('in-memory'),
+      sessions: record('in-memory'),
+      sendMessage: record('in-memory'),
+      steer: record('in-memory'),
+      cancel: record('in-memory'),
+      events: record('in-memory'),
+      diff: record('in-memory'),
+      permissions: {
+        supported: false,
+        state: 'unavailable' as const,
+        reason: 'not exercised in offline benchmark',
+      },
+      model: record('in-memory'),
+      reasoning: record('in-memory'),
       limitations: ['offline benchmark peer; not a live provider'],
     };
   }
 
-  async listSessions(): Promise<AgentSession[]> { return [...this.sessions.values()]; }
+  async listSessions(): Promise<AgentSession[]> {
+    return [...this.sessions.values()];
+  }
 
-  async getSession(nativeId: string): Promise<AgentSession | null> { return this.sessions.get(nativeId) ?? null; }
+  async getSession(nativeId: string): Promise<AgentSession | null> {
+    return this.sessions.get(nativeId) ?? null;
+  }
 
   async createSession(options: { cwd?: string; title?: string } = {}): Promise<AgentSession> {
     const nativeId = `${this.id}-bench-${this.sessions.size + 1}`;
     const session: AgentSession = {
-      provider: this.id, nativeId, transport: 'in-memory', cwd: options.cwd,
+      provider: this.id,
+      nativeId,
+      transport: 'in-memory',
+      cwd: options.cwd,
       title: options.title ?? `${this.displayName} ${nativeId}`,
-      id: `${this.id}:${nativeId}`, state: 'idle', model: 'bench-model', metadata: {}, live: false,
+      id: `${this.id}:${nativeId}`,
+      state: 'idle',
+      model: 'bench-model',
+      metadata: {},
+      live: false,
       provenance: { discoveredAt: new Date().toISOString(), source: 'benchmark', native: true },
     };
     this.sessions.set(nativeId, session);
@@ -107,7 +151,14 @@ export class InMemoryProvider implements AgentAdapter {
     this.emit(nativeId, { type: 'message.accepted', data: { preview: text.slice(0, 120) } });
     this.emit(nativeId, { type: 'turn.completed', data: { stopReason: 'end_turn' } });
     this.runState.set(nativeId, 'completed');
-    return { provider: this.id, nativeId, operation: 'send', accepted: true, status: 'queued', providerState: 'running' };
+    return {
+      provider: this.id,
+      nativeId,
+      operation: 'send',
+      accepted: true,
+      status: 'queued',
+      providerState: 'running',
+    };
   }
 
   async steer(nativeId: string, text: string, options?: AgentSendOptions): Promise<OperationReceipt> {
@@ -115,7 +166,12 @@ export class InMemoryProvider implements AgentAdapter {
   }
 
   async cancel(nativeId: string): Promise<OperationReceipt> {
-    this.usageObservations.push({ provider: this.id, nativeId, kind: 'cancel', at: new Date().toISOString() });
+    this.usageObservations.push({
+      provider: this.id,
+      nativeId,
+      kind: 'cancel',
+      at: new Date().toISOString(),
+    });
     this.runState.set(nativeId, 'cancelled');
     return { provider: this.id, nativeId, operation: 'cancel', accepted: true, status: 'completed' };
   }
@@ -136,13 +192,23 @@ export class InMemoryProvider implements AgentAdapter {
   }
 
   async getDiff(nativeId: string): Promise<Json | null> {
-    return { files: [{ path: `src/${nativeId}.ts`, additions: 12, deletions: 3 }], revision: `${this.id}:${nativeId}:rev-1` } as unknown as Json;
+    return {
+      files: [{ path: `src/${nativeId}.ts`, additions: 12, deletions: 3 }],
+      revision: `${this.id}:${nativeId}:rev-1`,
+    } as unknown as Json;
   }
 
   /** Only for tests/benchmark: pushes a synthetic event to the live tail. */
   emit(nativeId: string, event: { type: string; data: Json }): AgentEvent {
     const log = this.eventLog.get(nativeId) ?? [];
-    const record: AgentEvent = { provider: this.id, nativeId, sequence: log.length + 1, timestamp: new Date().toISOString(), type: event.type, data: event.data };
+    const record: AgentEvent = {
+      provider: this.id,
+      nativeId,
+      sequence: log.length + 1,
+      timestamp: new Date().toISOString(),
+      type: event.type,
+      data: event.data,
+    };
     log.push(record);
     this.eventLog.set(nativeId, log);
     for (const waiter of this.waiters.get(nativeId) ?? []) waiter(record);
@@ -154,11 +220,16 @@ export class InMemoryProvider implements AgentAdapter {
   async runTurn(nativeId: string, phases: Array<'blocked' | 'completed' | 'cancelled'>): Promise<void> {
     for (const phase of phases) {
       this.runState.set(nativeId, phase);
-      this.emit(nativeId, { type: phase === 'blocked' ? 'permission.requested' : `turn.${phase}`, data: { state: phase } });
+      this.emit(nativeId, {
+        type: phase === 'blocked' ? 'permission.requested' : `turn.${phase}`,
+        data: { state: phase },
+      });
     }
   }
 
-  dispose(): void { this.waiters.clear(); }
+  dispose(): void {
+    this.waiters.clear();
+  }
 }
 
 /**
@@ -177,9 +248,15 @@ export class DuplicateReadCounter {
 
   /** Items delivered to this consumer more than once. */
   duplicates(): Array<{ key: string; times: number }> {
-    return [...this.seen.entries()].filter(([, times]) => times > 1).map(([fingerprint, times]) => ({ key: fingerprint.split('::')[0]!, times }));
+    return [...this.seen.entries()]
+      .filter(([, times]) => times > 1)
+      .map(([fingerprint, times]) => ({ key: fingerprint.split('::')[0]!, times }));
   }
 
-  get totalReads(): number { return [...this.seen.values()].reduce((sum, times) => sum + times, 0); }
-  get uniqueItems(): number { return this.seen.size; }
+  get totalReads(): number {
+    return [...this.seen.values()].reduce((sum, times) => sum + times, 0);
+  }
+  get uniqueItems(): number {
+    return this.seen.size;
+  }
 }

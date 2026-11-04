@@ -1,10 +1,16 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import os from 'node:os';
-import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
-export interface LockInfo { pid: number; host: string; acquiredAt: string; owner: string; /** Unique per-acquisition token used for ownership-verified release/recovery. */ token: string }
+export interface LockInfo {
+  pid: number;
+  host: string;
+  acquiredAt: string;
+  owner: string /** Unique per-acquisition token used for ownership-verified release/recovery. */;
+  token: string;
+}
 
 const LOCK_RETRY_MS = 10;
 const LOCK_MAX_WAIT_MS = 10_000;
@@ -27,16 +33,28 @@ const LOCK_RENEW_INTERVAL_MS = 5_000;
 const heldLock = new AsyncLocalStorage<HeldLock>();
 const processLockTails = new Map<string, Promise<void>>();
 
-interface HeldLock { file: string; token: string }
+interface HeldLock {
+  file: string;
+  token: string;
+}
 
 async function isProcessAlive(pid: number): Promise<boolean> {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (pid === process.pid) return true;
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 async function readLockInfo(lockFile: string): Promise<LockInfo | undefined> {
-  try { return JSON.parse(await fs.readFile(lockFile, 'utf8')) as LockInfo; } catch { return undefined; }
+  try {
+    return JSON.parse(await fs.readFile(lockFile, 'utf8')) as LockInfo;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -87,7 +105,11 @@ async function tryPublishLock(lockFile: string, info: LockInfo): Promise<boolean
 async function lockIsRecoverable(lockFile: string): Promise<boolean> {
   const info = await readLockInfo(lockFile);
   if (!info) {
-    try { return Date.now() - (await fs.stat(lockFile)).mtimeMs > LOCK_ORPHAN_GRACE_MS; } catch { return true; }
+    try {
+      return Date.now() - (await fs.stat(lockFile)).mtimeMs > LOCK_ORPHAN_GRACE_MS;
+    } catch {
+      return true;
+    }
   }
   if (!(await isProcessAlive(info.pid))) {
     const acquired = Date.parse(info.acquiredAt);
@@ -119,7 +141,9 @@ export async function withStateLock<T>(file: string, owner: string, fn: () => Pr
   if (alreadyHeld?.file === resolved) return fn();
   const previous = processLockTails.get(resolved) ?? Promise.resolve();
   let releaseProcessLock!: () => void;
-  const gate = new Promise<void>((resolve) => { releaseProcessLock = resolve; });
+  const gate = new Promise<void>((resolve) => {
+    releaseProcessLock = resolve;
+  });
   const tail = previous.then(() => gate);
   processLockTails.set(resolved, tail);
   await previous;
@@ -138,10 +162,21 @@ async function withFileStateLock<T>(resolved: string, owner: string, fn: () => P
   const deadline = Date.now() + LOCK_MAX_WAIT_MS;
 
   for (;;) {
-    if (await tryPublishLock(lockFile, { pid: process.pid, host: os.hostname(), acquiredAt: new Date().toISOString(), owner, token })) break;
+    if (
+      await tryPublishLock(lockFile, {
+        pid: process.pid,
+        host: os.hostname(),
+        acquiredAt: new Date().toISOString(),
+        owner,
+        token,
+      })
+    )
+      break;
     if (Date.now() > deadline) {
       const current = await readLockInfo(lockFile);
-      throw new Error(`Could not acquire state lock for ${path.basename(resolved)} held by ${JSON.stringify(current ?? null)}`);
+      throw new Error(
+        `Could not acquire state lock for ${path.basename(resolved)} held by ${JSON.stringify(current ?? null)}`,
+      );
     }
     if (await lockIsRecoverable(lockFile)) {
       // Recoveries are serialized through a separate fixed recovery lock so two competing
@@ -209,11 +244,15 @@ async function releaseLock(lockFile: string, token: string): Promise<void> {
     // is serialized under the recovery lock AND re-verifies liveness before unlinking, and
     // we are alive while releasing, so the two operations cannot interleave destructively.
     await fs.unlink(lockFile);
-  } catch { /* already gone; best effort */ }
+  } catch {
+    /* already gone; best effort */
+  }
 }
 
 export async function readJsonFile<T>(file: string): Promise<T | undefined> {
-  try { return JSON.parse(await fs.readFile(file, 'utf8')) as T; } catch (error) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8')) as T;
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
   }
@@ -233,7 +272,7 @@ async function renameWithRetry(temp: string, file: string): Promise<void> {
       const code = (error as NodeJS.ErrnoException).code;
       const retryable = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '');
       if (!retryable || attempt >= WINDOWS_RENAME_RETRIES) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10 * (2 ** attempt)));
+      await new Promise((resolve) => setTimeout(resolve, 10 * 2 ** attempt));
     }
   }
 }
@@ -251,4 +290,6 @@ export async function atomicWriteJson(file: string, value: unknown): Promise<voi
   if (process.platform !== 'win32') await fs.chmod(file, 0o600);
 }
 
-export function transactionId(prefix: string): string { return `${prefix}_${randomUUID()}`; }
+export function transactionId(prefix: string): string {
+  return `${prefix}_${randomUUID()}`;
+}

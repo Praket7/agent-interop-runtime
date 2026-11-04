@@ -1,14 +1,25 @@
-import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import type { ProviderId, AgentSendOptions, OperationReceipt } from './interop.js';
+import fs from 'node:fs/promises';
+import type { AgentSendOptions, OperationReceipt, ProviderId } from './interop.js';
 import type { InteropRegistry } from './interop-runtime.js';
 import { atomicWriteJson, withStateLock } from './state.js';
 
-export interface ConversationParticipant { id: string; provider: ProviderId; nativeId: string; workspaceId?: string; role?: 'sender' | 'reviewer' | 'editor'; }
+export interface ConversationParticipant {
+  id: string;
+  provider: ProviderId;
+  nativeId: string;
+  workspaceId?: string;
+  role?: 'sender' | 'reviewer' | 'editor';
+}
 export type DeliveryState = 'queued' | 'rejected' | 'delivery_unknown' | 'completed';
 export interface ConversationMessage {
-  id: string; conversationId: string; sender: string; recipient: string; text: string;
-  replyTo?: string; createdAt: string;
+  id: string;
+  conversationId: string;
+  sender: string;
+  recipient: string;
+  text: string;
+  replyTo?: string;
+  createdAt: string;
   /** Monotonic per-conversation sequence; survives retention trimming and is stable for pagination. */
   sequence: number;
   receipt?: OperationReceipt;
@@ -19,7 +30,15 @@ export interface ConversationMessage {
   /** Durable cross-process dispatch lease. Reconciliation never reclassifies a live lease. */
   dispatchLease?: { id: string; startedAt: string; expiresAt: string };
 }
-export interface Conversation { id: string; title: string; participants: ConversationParticipant[]; messages: ConversationMessage[]; createdAt: string; updatedAt: string; /** Highest sequence ever assigned, persisted so monotonic cursors survive restart and trimming. */ lastSequence: number; }
+export interface Conversation {
+  id: string;
+  title: string;
+  participants: ConversationParticipant[];
+  messages: ConversationMessage[];
+  createdAt: string;
+  updatedAt: string /** Highest sequence ever assigned, persisted so monotonic cursors survive restart and trimming. */;
+  lastSequence: number;
+}
 export type ConversationSummary = Omit<Conversation, 'messages'> & { messageCount: number };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const stamp = () => new Date().toISOString();
@@ -38,7 +57,10 @@ export class ConversationStore {
 
   /** All operations gate on initialization so early reads cannot see empty state (section 4 gap). */
   private async ensureLoaded(): Promise<void> {
-    if (this.loaded) { await this.refreshFromDisk(); return; }
+    if (this.loaded) {
+      await this.refreshFromDisk();
+      return;
+    }
     this.loading ??= this.load();
     await this.loading;
   }
@@ -49,11 +71,18 @@ export class ConversationStore {
     this.loaded = true;
   }
 
-  loadErrorReason(): string | undefined { return this.loadError; }
+  loadErrorReason(): string | undefined {
+    return this.loadError;
+  }
 
   /** File signature used to detect external writes cheaply on read paths (AIR-04). */
   private async currentSignature(): Promise<string> {
-    try { const stat = await fs.stat(this.file); return `${stat.mtimeMs}:${stat.size}`; } catch { return ''; }
+    try {
+      const stat = await fs.stat(this.file);
+      return `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -69,12 +98,19 @@ export class ConversationStore {
     try {
       raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as { conversations?: unknown[] };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { this.conversations.clear(); this.diskSignature = signature; return; }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.conversations.clear();
+        this.diskSignature = signature;
+        return;
+      }
       this.loadError = error instanceof Error ? error.message : String(error);
       throw new Error(`Conversation state is not readable: ${this.loadError}`);
     }
     const disk = new Map<string, Conversation>();
-    for (const value of raw.conversations ?? []) { const conversation = this.normalize(value); if (conversation) disk.set(conversation.id, conversation); }
+    for (const value of raw.conversations ?? []) {
+      const conversation = this.normalize(value);
+      if (conversation) disk.set(conversation.id, conversation);
+    }
     this.conversations = disk;
     this.diskSignature = signature;
   }
@@ -82,14 +118,23 @@ export class ConversationStore {
   /** Migration: assign monotonic sequence numbers and conversation-level counters to pre-0.3 state. */
   private normalize(value: unknown): Conversation | null {
     const conversation = value as Conversation;
-    if (!conversation?.id || !Array.isArray(conversation.participants) || !Array.isArray(conversation.messages)) return null;
+    if (
+      !conversation?.id ||
+      !Array.isArray(conversation.participants) ||
+      !Array.isArray(conversation.messages)
+    )
+      return null;
     let counter = 0;
     for (const message of conversation.messages) {
       counter += 1;
       if (typeof message.sequence !== 'number') message.sequence = counter;
     }
     const highest = conversation.messages.reduce((max, m) => Math.max(max, m.sequence ?? 0), 0);
-    conversation.lastSequence = Math.max(typeof conversation.lastSequence === 'number' ? conversation.lastSequence : 0, highest, conversation.messages.length);
+    conversation.lastSequence = Math.max(
+      typeof conversation.lastSequence === 'number' ? conversation.lastSequence : 0,
+      highest,
+      conversation.messages.length,
+    );
     return conversation;
   }
 
@@ -98,33 +143,60 @@ export class ConversationStore {
     await this.ensureLoaded();
     const ordered = [...this.conversations.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return ordered.map((conversation) => ({
-      id: conversation.id, title: conversation.title, participants: clone(conversation.participants),
-      createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, lastSequence: conversation.lastSequence,
+      id: conversation.id,
+      title: conversation.title,
+      participants: clone(conversation.participants),
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      lastSequence: conversation.lastSequence,
       messageCount: conversation.messages.length,
       ...(options?.detail ? { messages: clone(conversation.messages) } : {}),
     })) as ConversationSummary[];
   }
 
-  async get(id: string): Promise<Conversation | null> { await this.ensureLoaded(); return clone(this.conversations.get(id) ?? null); }
+  async get(id: string): Promise<Conversation | null> {
+    await this.ensureLoaded();
+    return clone(this.conversations.get(id) ?? null);
+  }
 
   async create(title: string): Promise<Conversation> {
     await this.ensureLoaded();
     return this.transact(() => {
       const time = stamp();
-      const conversation: Conversation = { id: newId('conversation'), title: title.trim().slice(0, 300), participants: [], messages: [], createdAt: time, updatedAt: time, lastSequence: 0 };
+      const conversation: Conversation = {
+        id: newId('conversation'),
+        title: title.trim().slice(0, 300),
+        participants: [],
+        messages: [],
+        createdAt: time,
+        updatedAt: time,
+        lastSequence: 0,
+      };
       this.conversations.set(conversation.id, conversation);
       return clone(conversation);
     });
   }
 
-  async join(conversationId: string, participant: Omit<ConversationParticipant, 'id'> & { id?: string }): Promise<Conversation> {
+  async join(
+    conversationId: string,
+    participant: Omit<ConversationParticipant, 'id'> & { id?: string },
+  ): Promise<Conversation> {
     await this.ensureLoaded();
     return this.transact(() => {
       const conversation = this.require(conversationId);
-      const existing = conversation.participants.find((value) => value.provider === participant.provider && value.nativeId === participant.nativeId);
+      const existing = conversation.participants.find(
+        (value) => value.provider === participant.provider && value.nativeId === participant.nativeId,
+      );
       const participantId = participant.id ?? `${participant.provider}:${participant.nativeId}`;
-      const idCollision = conversation.participants.find((value) => value.id === participantId && (value.provider !== participant.provider || value.nativeId !== participant.nativeId));
-      if (idCollision) throw new Error(`Participant ID '${participantId}' is already bound to ${idCollision.provider}:${idCollision.nativeId}`);
+      const idCollision = conversation.participants.find(
+        (value) =>
+          value.id === participantId &&
+          (value.provider !== participant.provider || value.nativeId !== participant.nativeId),
+      );
+      if (idCollision)
+        throw new Error(
+          `Participant ID '${participantId}' is already bound to ${idCollision.provider}:${idCollision.nativeId}`,
+        );
       if (!existing) conversation.participants.push({ ...participant, id: participantId });
       conversation.updatedAt = stamp();
       return clone(conversation);
@@ -142,7 +214,16 @@ export class ConversationStore {
    * are participant IDs within this conversation; the participant record is resolved under the
    * transaction so routing and receipt identity come from the authoritative join record.
    */
-  async send(conversationId: string, sender: string, recipient: string, text: string, registry: InteropRegistry, options?: AgentSendOptions, replyTo?: string, callerIdempotencyKey?: string): Promise<{ message: ConversationMessage; receipt: OperationReceipt }> {
+  async send(
+    conversationId: string,
+    sender: string,
+    recipient: string,
+    text: string,
+    registry: InteropRegistry,
+    options?: AgentSendOptions,
+    replyTo?: string,
+    callerIdempotencyKey?: string,
+  ): Promise<{ message: ConversationMessage; receipt: OperationReceipt }> {
     await this.ensureLoaded();
     // Idempotency: a caller may supply a stable key (e.g. derived from work ID + handoff ID)
     // so a crashed/retried send resolves to the SAME message record instead of enqueueing a
@@ -154,26 +235,47 @@ export class ConversationStore {
     // outbound record. Two processes using the same caller key can no longer both pass a
     // stale preflight check and enqueue duplicate provider work.
     const { pending, destination } = await this.transact(() => {
-      const duplicate = [...this.conversations.values()].flatMap((value) => value.messages).find((message) => message.idempotencyKey === idempotencyKey);
-      if (duplicate) throw new Error(`Idempotency key '${idempotencyKey}' already has a message (${duplicate.id}, delivery ${duplicate.delivery}). Inspect the existing record instead of resending.`);
+      const duplicate = [...this.conversations.values()]
+        .flatMap((value) => value.messages)
+        .find((message) => message.idempotencyKey === idempotencyKey);
+      if (duplicate)
+        throw new Error(
+          `Idempotency key '${idempotencyKey}' already has a message (${duplicate.id}, delivery ${duplicate.delivery}). Inspect the existing record instead of resending.`,
+        );
       const conversation = this.require(conversationId);
-      if (!conversation.participants.some((value) => value.id === sender)) throw new Error(`Unknown conversation sender ${sender}`);
+      if (!conversation.participants.some((value) => value.id === sender))
+        throw new Error(`Unknown conversation sender ${sender}`);
       const destinationParticipant = conversation.participants.find((value) => value.id === recipient);
       if (!destinationParticipant) throw new Error(`Unknown conversation recipient ${recipient}`);
-      if (replyTo && !conversation.messages.some((value) => value.id === replyTo)) throw new Error(`Unknown reply target ${replyTo} in conversation ${conversationId}`);
+      if (replyTo && !conversation.messages.some((value) => value.id === replyTo))
+        throw new Error(`Unknown reply target ${replyTo} in conversation ${conversationId}`);
       const leaseStarted = stamp();
       const message: ConversationMessage = {
-        id: newId('message'), conversationId, sender, recipient, text: trimmedText,
-        ...(replyTo ? { replyTo } : {}), createdAt: leaseStarted,
+        id: newId('message'),
+        conversationId,
+        sender,
+        recipient,
+        text: trimmedText,
+        ...(replyTo ? { replyTo } : {}),
+        createdAt: leaseStarted,
         sequence: conversation.lastSequence + 1,
-        delivery: 'queued', idempotencyKey,
-        dispatchLease: { id: newId('dispatch'), startedAt: leaseStarted, expiresAt: new Date(Date.now() + 120_000).toISOString() },
+        delivery: 'queued',
+        idempotencyKey,
+        dispatchLease: {
+          id: newId('dispatch'),
+          startedAt: leaseStarted,
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+        },
       };
       conversation.lastSequence = message.sequence;
       conversation.messages.push(message);
-      if (conversation.messages.length > MAX_MESSAGES_PER_CONVERSATION) conversation.messages.splice(0, conversation.messages.length - MAX_MESSAGES_PER_CONVERSATION);
+      if (conversation.messages.length > MAX_MESSAGES_PER_CONVERSATION)
+        conversation.messages.splice(0, conversation.messages.length - MAX_MESSAGES_PER_CONVERSATION);
       conversation.updatedAt = leaseStarted;
-      return { pending: clone(message), destination: { provider: destinationParticipant.provider, nativeId: destinationParticipant.nativeId } };
+      return {
+        pending: clone(message),
+        destination: { provider: destinationParticipant.provider, nativeId: destinationParticipant.nativeId },
+      };
     });
     const provider = destination.provider;
     const nativeId = destination.nativeId;
@@ -183,7 +285,9 @@ export class ConversationStore {
     // Blocker 3: mark the dispatch window so reconciliation treats the queued record as
     // healthy in-flight work, not a crash, while the provider call is executing.
     this.markDispatchStarted(pending.id);
-    const leaseTimer = setInterval(() => { void this.renewDispatchLease(pending.id, pending.dispatchLease?.id).catch(() => undefined); }, 30_000);
+    const leaseTimer = setInterval(() => {
+      void this.renewDispatchLease(pending.id, pending.dispatchLease?.id).catch(() => undefined);
+    }, 30_000);
     leaseTimer.unref?.();
     try {
       receipt = await registry.send(provider, nativeId, envelope, 'send', options);
@@ -199,19 +303,36 @@ export class ConversationStore {
           message.delivery = 'delivery_unknown';
           message.deliveryUnknownAt = stamp();
           delete message.dispatchLease;
-          message.receipt = { provider, nativeId, operation: 'send', accepted: false, status: 'rejected', detail: { reason, classification: 'delivery_unknown' } };
+          message.receipt = {
+            provider,
+            nativeId,
+            operation: 'send',
+            accepted: false,
+            status: 'rejected',
+            detail: { reason, classification: 'delivery_unknown' },
+          };
         }
         return null;
       });
-      throw new Error(`Message ${pending.id} persisted with delivery_unknown; it may have reached the provider and must not be resent blindly: ${reason}`);
+      throw new Error(
+        `Message ${pending.id} persisted with delivery_unknown; it may have reached the provider and must not be resent blindly: ${reason}`,
+      );
     }
     clearInterval(leaseTimer);
     this.markDispatchFinished(pending.id);
-    const delivery: DeliveryState = receipt.accepted ? (receipt.status === 'completed' ? 'completed' : 'queued') : 'rejected';
+    const delivery: DeliveryState = receipt.accepted
+      ? receipt.status === 'completed'
+        ? 'completed'
+        : 'queued'
+      : 'rejected';
     await this.transact(() => {
       const conversation = this.require(conversationId);
       const message = conversation.messages.find((m) => m.id === pending.id);
-      if (message) { message.receipt = receipt; message.delivery = delivery; delete message.dispatchLease; }
+      if (message) {
+        message.receipt = receipt;
+        message.delivery = delivery;
+        delete message.dispatchLease;
+      }
       return null;
     });
     const deliveredMessage = { ...pending, receipt, delivery };
@@ -224,7 +345,17 @@ export class ConversationStore {
    * trimming never strands a cursor. Returns an explicit retention gap when `afterSequence`
    * predates the oldest retained message.
    */
-  async read(conversationId: string, afterSequence = 0, limit = 100): Promise<{ conversation: ConversationSummary; messages: ConversationMessage[]; next: number; latestSequence: number; gap?: { from: number; to: number } }> {
+  async read(
+    conversationId: string,
+    afterSequence = 0,
+    limit = 100,
+  ): Promise<{
+    conversation: ConversationSummary;
+    messages: ConversationMessage[];
+    next: number;
+    latestSequence: number;
+    gap?: { from: number; to: number };
+  }> {
     await this.ensureLoaded();
     const conversation = this.require(conversationId);
     const boundedLimit = Math.min(Math.max(limit, 1), 100);
@@ -234,11 +365,21 @@ export class ConversationStore {
     const lastDelivered = page.at(-1)?.sequence ?? afterSequence;
     const latest = ordered.at(-1)?.sequence ?? conversation.lastSequence;
     return {
-      conversation: { id: conversation.id, title: conversation.title, participants: clone(conversation.participants), createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, lastSequence: conversation.lastSequence, messageCount: conversation.messages.length },
+      conversation: {
+        id: conversation.id,
+        title: conversation.title,
+        participants: clone(conversation.participants),
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+        lastSequence: conversation.lastSequence,
+        messageCount: conversation.messages.length,
+      },
       messages: clone(page),
       next: lastDelivered,
       latestSequence: latest,
-      ...(firstAvailable !== undefined && afterSequence + 1 < firstAvailable ? { gap: { from: afterSequence + 1, to: firstAvailable - 1 } } : {}),
+      ...(firstAvailable !== undefined && afterSequence + 1 < firstAvailable
+        ? { gap: { from: afterSequence + 1, to: firstAvailable - 1 } }
+        : {}),
     };
   }
 
@@ -293,7 +434,10 @@ export class ConversationStore {
    * Records are NEVER automatically resent: reconciliation reclassifies and closes records;
    * re-delivery is a separate, explicit caller decision.
    */
-  async reconcileInterruptedSends(conversationId?: string, observedReceipts?: Array<{ idempotencyKey: string; receipt: OperationReceipt }>): Promise<Array<{ message: ConversationMessage; resolved: boolean; previousDelivery: DeliveryState } >> {
+  async reconcileInterruptedSends(
+    conversationId?: string,
+    observedReceipts?: Array<{ idempotencyKey: string; receipt: OperationReceipt }>,
+  ): Promise<Array<{ message: ConversationMessage; resolved: boolean; previousDelivery: DeliveryState }>> {
     const receipts = new Map((observedReceipts ?? []).map((entry) => [entry.idempotencyKey, entry.receipt]));
     const resolvedIds = new Set<string>();
     const skippedInFlight = new Set<string>();
@@ -301,7 +445,12 @@ export class ConversationStore {
     await this.transact(() => {
       const candidates = [...this.conversations.values()]
         .filter((conversation) => !conversationId || conversation.id === conversationId)
-        .flatMap((conversation) => conversation.messages.filter((message) => message.delivery === 'delivery_unknown' || (message.delivery === 'queued' && !message.receipt)));
+        .flatMap((conversation) =>
+          conversation.messages.filter(
+            (message) =>
+              message.delivery === 'delivery_unknown' || (message.delivery === 'queued' && !message.receipt),
+          ),
+        );
       for (const stored of candidates) {
         const conversation = this.conversations.get(stored.conversationId);
         const message = conversation?.messages.find((m) => m.id === stored.id);
@@ -317,12 +466,22 @@ export class ConversationStore {
         // exactly what reconciliation assigns; if the original dispatch later completes, its
         // receipt transaction overwrites the classification (send() writes the receipt for
         // its own message ID unconditionally on return).
-        const leaseActive = previousDelivery === 'queued' && message.dispatchLease && Date.parse(message.dispatchLease.expiresAt) > Date.now();
-        if (previousDelivery === 'queued' && (this.inFlightDispatches.has(message.id) || leaseActive)) { skippedInFlight.add(message.id); continue; }
+        const leaseActive =
+          previousDelivery === 'queued' &&
+          message.dispatchLease &&
+          Date.parse(message.dispatchLease.expiresAt) > Date.now();
+        if (previousDelivery === 'queued' && (this.inFlightDispatches.has(message.id) || leaseActive)) {
+          skippedInFlight.add(message.id);
+          continue;
+        }
         const observed = receipts.get(message.idempotencyKey ?? '');
         if (observed) {
           message.receipt = observed;
-          message.delivery = observed.accepted ? (observed.status === 'completed' ? 'completed' : 'queued') : 'rejected';
+          message.delivery = observed.accepted
+            ? observed.status === 'completed'
+              ? 'completed'
+              : 'queued'
+            : 'rejected';
           resolvedIds.add(message.id);
         } else if (message.delivery === 'queued') {
           // Interrupted dispatch with no observed outcome: the provider may or may not have
@@ -339,7 +498,8 @@ export class ConversationStore {
       return null;
     });
     await this.ensureLoaded();
-    const out: Array<{ message: ConversationMessage; resolved: boolean; previousDelivery: DeliveryState }> = [];
+    const out: Array<{ message: ConversationMessage; resolved: boolean; previousDelivery: DeliveryState }> =
+      [];
     for (const conversation of this.conversations.values()) {
       if (conversationId && conversation.id !== conversationId) continue;
       for (const message of conversation.messages) {
@@ -371,12 +531,19 @@ export class ConversationStore {
   private readonly inFlightDispatches = new Set<string>();
 
   /** Called by send() around the provider call; exposed for testing in-flight protection. */
-  markDispatchStarted(messageId: string): void { this.inFlightDispatches.add(messageId); }
-  markDispatchFinished(messageId: string): void { this.inFlightDispatches.delete(messageId); }
+  markDispatchStarted(messageId: string): void {
+    this.inFlightDispatches.add(messageId);
+  }
+  markDispatchFinished(messageId: string): void {
+    this.inFlightDispatches.delete(messageId);
+  }
 
   // AIR-01: routing uses the joined participant record resolved under the transaction; the
   // composite participant ID is never interpreted as a provider or native session ID.
-  private async resolveDestination(conversationId: string, recipient: string): Promise<{ provider: ProviderId; nativeId: string }> {
+  private async resolveDestination(
+    conversationId: string,
+    recipient: string,
+  ): Promise<{ provider: ProviderId; nativeId: string }> {
     await this.ensureLoaded();
     const conversation = this.conversations.get(conversationId);
     const participant = conversation?.participants.find((value) => value.id === recipient);

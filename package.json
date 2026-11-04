@@ -1,6 +1,6 @@
 {
   "name": "agent-interop-runtime",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "mcpName": "io.github.Praket7/agent-interop-runtime",
   "description": "Coordinate coding agents through a local MCP runtime while keeping provider accounts and workspaces separate.",
   "keywords": [
@@ -47,7 +47,7 @@
     "prepack": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "pnpm build && node scripts/run-tests.mjs",
-    "lint": "node scripts/lint.mjs",
+    "lint": "pnpm exec biome ci --diagnostic-level=error src test scripts && node scripts/lint.mjs",
     "pty:probe": "pnpm build && node scripts/probe-pty.mjs",
     "mcp:validate": "node scripts/validate-mcp.mjs",
     "bench": "node --import tsx scripts/benchmark.mjs",
@@ -60,7 +60,8 @@
     "node": ">=20 <27"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "js-tiktoken": "^1.0.21",
     "zod": "^4.6.7"
   },
@@ -68,6 +69,8 @@
     "node-pty": "1.2.0-beta.15"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.2"

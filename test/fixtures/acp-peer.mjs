@@ -10,7 +10,11 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   if (!line.trim()) return;
   let message;
-  try { message = JSON.parse(line); } catch { return; }
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return;
+  }
   if (message.method === 'initialize' && message.id !== undefined) {
     respond(message.id, { protocolVersion: 1, agentCapabilities: { loadSession: true } });
     return;
