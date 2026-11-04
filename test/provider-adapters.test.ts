@@ -350,7 +350,9 @@ test('OpenCode does not send configured credentials to unconfigured loopback lis
   const previousUrl = process.env.OPENCODE_SERVER_URL;
   const previousUser = process.env.OPENCODE_SERVER_USERNAME;
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  const previousAutoStart = process.env.OPENCODE_AUTO_START;
   delete process.env.OPENCODE_SERVER_URL;
+  process.env.OPENCODE_AUTO_START = 'false';
   process.env.OPENCODE_SERVER_USERNAME = 'alice';
   process.env.OPENCODE_SERVER_PASSWORD = 'secret';
   const observed: Array<{ url: string; authorization?: string }> = [];
@@ -377,5 +379,34 @@ test('OpenCode does not send configured credentials to unconfigured loopback lis
     else process.env.OPENCODE_SERVER_USERNAME = previousUser;
     if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
     else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+    if (previousAutoStart === undefined) delete process.env.OPENCODE_AUTO_START;
+    else process.env.OPENCODE_AUTO_START = previousAutoStart;
+  }
+});
+
+test('OpenCode degrades cleanly when its optional CLI cannot be started', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousPath = process.env.PATH;
+  const previousUrl = process.env.OPENCODE_SERVER_URL;
+  const previousAutoStart = process.env.OPENCODE_AUTO_START;
+  delete process.env.OPENCODE_SERVER_URL;
+  delete process.env.OPENCODE_AUTO_START;
+  process.env.PATH = '';
+  globalThis.fetch = async () => {
+    throw new Error('no local OpenCode server');
+  };
+  try {
+    const caps = await new OpenCodeAdapter().capabilities();
+    assert.equal(caps.discovery.supported, false);
+    assert.equal(caps.discovery.state, 'unavailable');
+    assert.match(caps.discovery.reason ?? '', /opencode|ENOENT|not found/i);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousUrl === undefined) delete process.env.OPENCODE_SERVER_URL;
+    else process.env.OPENCODE_SERVER_URL = previousUrl;
+    if (previousAutoStart === undefined) delete process.env.OPENCODE_AUTO_START;
+    else process.env.OPENCODE_AUTO_START = previousAutoStart;
   }
 });

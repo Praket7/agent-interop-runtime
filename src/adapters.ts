@@ -196,15 +196,24 @@ export class OpenCodeAdapter implements AgentAdapter {
       try {
         const port = await freeTcpPort();
         const command = process.platform === 'win32' ? 'opencode.cmd' : 'opencode';
+        let startupError: Error | undefined;
         this.managedServer = spawn(command, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], {
           stdio: 'ignore',
           windowsHide: true,
           shell: process.platform === 'win32',
         });
+        // A missing optional CLI emits `error` asynchronously. Listen for it so an
+        // unavailable provider degrades cleanly instead of crashing the MCP process.
+        this.managedServer.once('error', (error) => {
+          startupError = error;
+        });
         this.managedServer.unref();
         const url = new URL(`http://127.0.0.1:${port}`);
         for (let attempt = 0; attempt < 40; attempt += 1) {
-          if (this.managedServer.exitCode !== null) return undefined;
+          if (startupError || this.managedServer.exitCode !== null) {
+            this.managedServer = undefined;
+            return undefined;
+          }
           try {
             const response = await fetch(new URL('/global/health', url), {
               headers: this.authHeaders(url),
